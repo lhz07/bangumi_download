@@ -1,10 +1,13 @@
 use once_cell::sync::Lazy;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{error::Error, path::Path, vec};
 use tokio::{
     fs::{self},
     sync::{RwLock, mpsc},
 };
+
+use crate::cloud_manager::update_cloud_cookies;
 
 pub static CONFIG: Lazy<RwLock<Config>> = Lazy::new(|| RwLock::new(Config::new()));
 
@@ -32,24 +35,57 @@ pub struct Config {
 
 impl Config {
     fn new() -> Self {
-        let default_config = serde_json::json!({"bangumi":{}, "cookies": {}, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "downloading": {}, "temp": {}, "files_to_download": {}});
-        let default_json = serde_json::to_string_pretty(&default_config).unwrap();
         let path = Path::new("config.json");
-        let data = if path.exists() {
-            match std::fs::read_to_string("config.json").expect("can not read config.json") {
-                json_content if !json_content.is_empty() => {
-                    serde_json::from_str(&json_content).expect("invalid json!")
-                }
-                _ => {
-                    std::fs::write(path, default_json).expect("can not write to path!");
-                    default_config
+        let old_json = std::fs::read_to_string(path).expect("can not read config.json");
+        let data = if path.exists() && !old_json.is_empty() {
+            let json = serde_json::from_str(&old_json).unwrap_or_else(|error| {
+                eprintln!(
+                    "Invalid json format, you may try empty or delete config.json\nError: {error}"
+                );
+                std::process::exit(1);
+            });
+            match Self::check_valid(&json) {
+                Some(()) => json,
+                None => {
+                    eprintln!("Some data of config.json is missing!");
+                    std::process::exit(1);
                 }
             }
         } else {
-            std::fs::write(path, default_json).expect("can not write to path!");
+            // get username and password
+            println!("Username:");
+            let mut name = String::new();
+            std::io::stdin().read_line(&mut name).expect("Failed to read username!");
+            name = name.trim().to_string();
+            let mut hasher = Sha256::new();
+            println!("Password:");
+            hasher.update(rpassword::read_password().expect("Failed to read password") + "-https://github.com/alist-org/alist");
+            let password = hex::encode(hasher.finalize());
+            let cookies = tokio::runtime::Runtime::new().expect("Can not start thread!").block_on(async{
+                update_cloud_cookies().await
+            });
+            let default_config = serde_json::json!({"user":{"name":name, "password": password},"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "downloading": {}, "temp": {}, "files_to_download": {}});
+            let default_json = serde_json::to_string_pretty(&default_config).unwrap();
+            std::fs::write(path, default_json).unwrap_or_else(|error| {
+                eprintln!("Can not write to path!\nError: {error}");
+                std::process::exit(1);
+            });
             default_config
         };
         Config { data }
+    }
+
+    fn check_valid(json: &Value) -> Option<()> {
+        json["user"]["name"].is_string().then_some(())?;
+        json["bangumi"].is_object().then_some(())?;
+        json["cookies"].is_object().then_some(())?;
+        json["downloading"].is_object().then_some(())?;
+        json["files_to_download"].is_object().then_some(())?;
+        json["filter"]["default"].is_array().then_some(())?;
+        json["rss_links"].is_object().then_some(())?;
+        json["temp"].is_object().then_some(())?;
+
+        Some(())
     }
 
     pub fn get_value(&self) -> &Value {

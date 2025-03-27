@@ -1,9 +1,9 @@
 use qrcode::QrCode;
-use serde_json::{Map, Value};
-use std::{collections::HashMap, default, error::Error};
+use serde_json::Value;
+use std::error::Error;
 
 
-const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];
+// const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];
 
 async fn get_qrcode_token(client: reqwest::Client) -> Result<Value, Box<dyn Error>> {
     let response = client
@@ -44,7 +44,7 @@ async fn get_qrcode_status(
     Ok(json)
 }
 
-pub async fn login_with_qrcode(app: &str) -> Result<HashMap<String, String>, Box<dyn Error>> {
+pub async fn login_with_qrcode(app: &str) -> Result<Value, Box<dyn Error>> {
     let client = reqwest::Client::new();
     let mut qrcode_token = get_qrcode_token(client.clone()).await?["data"].take();
     let qrcode_value = qrcode_token["qrcode"].take();
@@ -73,12 +73,8 @@ pub async fn login_with_qrcode(app: &str) -> Result<HashMap<String, String>, Box
             Err(error) => {eprintln!("Error: {error}");continue;}
         }
     }
-    let result = post_qrcode_result(client.clone(), qrcode_token["uid"].as_str().unwrap(), app).await?;
-    let cookies_value = result["data"]["cookie"].as_object().ok_or("can not get cookies")?;
-    let mut cookies = HashMap::new();
-    for (key, value) in cookies_value{
-        cookies.insert(key.clone(), value.as_str().unwrap().to_owned());
-    }
-    
+    let mut result = post_qrcode_result(client.clone(), qrcode_token["uid"].as_str().unwrap(), app).await?;
+    result["data"]["cookie"].is_object().then_some(()).ok_or("can not get cookies")?;
+    let cookies = result["data"]["cookie"].take();
     Ok(cookies)
 }
