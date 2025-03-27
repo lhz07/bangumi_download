@@ -3,7 +3,7 @@ use futures::future;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::{error::Error, pin::Pin, vec};
-use tokio::{fs, sync::mpsc};
+use tokio::sync::mpsc;
 
 async fn get_response_text(url: &str, client: reqwest::Client) -> Result<String, reqwest::Error> {
     Ok(client.get(url).send().await?.text().await?)
@@ -20,11 +20,7 @@ pub async fn start_rss_receive(urls: Vec<&str>) {
     txs.push(tx);
     // create client
     let client = reqwest::Client::new();
-    // read the config file
-
-    // let file_content = fs::read_to_string("config.json")
-    //     .await
-    //     .expect("can not read config.json");
+    // read the config
     let old_config: Value = CONFIG.read().await.get_value().clone();
     // create the sender futures
     let mut futs: Vec<Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>>>>> = Vec::new();
@@ -102,7 +98,7 @@ pub async fn rss_receive(
         .to_string();
     let bangumi_id = format!("{ani_id}&{sub_id}");
     // check if the bangumi updates and is it first time to be added
-    let old_bangumi_dict = old_config["bangumi"].as_object().ok_or("can not find old bangumi!")?;
+    let old_bangumi_dict = old_config["bangumi"].as_object().unwrap();
     if !old_bangumi_dict.contains_key(&bangumi_id){
         // TODO: download_all_episode(ani_id, sub_id, title)
         // write to config
@@ -117,17 +113,48 @@ pub async fn rss_receive(
     }else if latest_update == old_bangumi_dict[&bangumi_id]{
         println!("{title} 无更新");
     }else {
-        let mut item_iter = rss_content["item"].as_array().ok_or("can not find item!")?.iter().rev();
+        let mut item_iter = rss_content["item"].as_array().ok_or("can not find item in rss!")?.iter().rev();
         for item in &mut item_iter {
             let pub_date = item["torrent"]["pubDate"].as_str().ok_or("can not found pub_date!")?;
             if pub_date == old_bangumi_dict[&bangumi_id]{
                 break;
             }
         }
+        let new_items = item_iter.collect::<Vec<_>>();
         println!("获取到以下剧集：");
-        for item in item_iter{
-            println!("{}", item["title"].as_str().ok_or("title not found!")?);
+        let filter = &old_config["filter"];
+        let default_filter = &filter["default"].as_array().unwrap();
+        let mut magnet_links: Vec<String> = Vec::new();
+        for i in &new_items{
+            if i["title"].as_str().unwrap().contains("内封"){
+                // TODO: magnet_links.append(get_magnet(i['link']))
+                magnet_links.push(i["link"].as_str().unwrap().to_string());
+                println!("{}", i["title"].as_str().unwrap());
+            }
         }
+        if magnet_links.is_empty(){
+            for i in &new_items{
+                for j in *default_filter{
+                    if i["title"].as_str().unwrap().contains(j.as_str().unwrap()){
+                        magnet_links.push(i["link"].as_str().unwrap().to_string());
+                        println!("{}", i["title"].as_str().unwrap());
+                        break;
+                    }
+                }
+            }
+        }
+        if magnet_links.is_empty(){
+            for i in &items{
+                magnet_links.push(i["link"].as_str().unwrap().to_string());
+                println!("{}", i["title"].as_str().unwrap());
+            }
+        }
+        let msg = Message::new(
+            vec!["bangumi".to_string(), format!("{ani_id}&{sub_id}")],
+            latest_update,
+            false,
+        );
+        tx.send(msg)?;
     }
 
     
