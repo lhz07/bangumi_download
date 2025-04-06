@@ -2,7 +2,6 @@ use qrcode::QrCode;
 use serde_json::Value;
 use std::error::Error;
 
-
 // const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];
 
 async fn get_qrcode_token(client: reqwest::Client) -> Result<Value, Box<dyn Error>> {
@@ -16,7 +15,11 @@ async fn get_qrcode_token(client: reqwest::Client) -> Result<Value, Box<dyn Erro
     Ok(json)
 }
 
-async fn post_qrcode_result(client: reqwest::Client, uid: &str, app: &str) -> Result<Value, Box<dyn Error>>{
+async fn post_qrcode_result(
+    client: reqwest::Client,
+    uid: &str,
+    app: &str,
+) -> Result<Value, Box<dyn Error>> {
     let url = format!("https://passportapi.115.com/app/1.0/{app}/1.0/login/qrcode/");
     let response = client
         .post(url)
@@ -44,7 +47,7 @@ async fn get_qrcode_status(
     Ok(json)
 }
 
-pub async fn login_with_qrcode(app: &str) -> Result<Value, Box<dyn Error>> {
+pub async fn login_with_qrcode(app: &str) -> Result<String, Box<dyn Error>> {
     let client = reqwest::Client::new();
     let mut qrcode_token = get_qrcode_token(client.clone()).await?["data"].take();
     let qrcode_value = qrcode_token["qrcode"].take();
@@ -61,20 +64,44 @@ pub async fn login_with_qrcode(app: &str) -> Result<Value, Box<dyn Error>> {
         .build();
     println!("{}", code_string);
     loop {
-        match get_qrcode_status(client.clone(), &qrcode_token).await{
-            Ok(status) => match status["data"]["status"].as_i64().ok_or("can not get status")? {
+        match get_qrcode_status(client.clone(), &qrcode_token).await {
+            Ok(status) => match status["data"]["status"]
+                .as_i64()
+                .ok_or("can not get status")?
+            {
                 0 => println!("[status=0] qrcode: waiting"),
                 1 => println!("[status=1] qrcode: scanned"),
-                2 => {println!("[status=2] qrcode: signed in"); break;}
+                2 => {
+                    println!("[status=2] qrcode: signed in");
+                    break;
+                }
                 -1 => return Err("[status=-1] qrcode: expired".into()),
                 -2 => return Err("[status=-2] qrcode: canceled".into()),
                 _ => return Err(format!("qrcode: aborted with {status}").into()),
             },
-            Err(error) => {eprintln!("Error: {error}");continue;}
+            Err(error) => {
+                eprintln!("Error: {error}");
+                continue;
+            }
         }
     }
-    let mut result = post_qrcode_result(client.clone(), qrcode_token["uid"].as_str().unwrap(), app).await?;
-    result["data"]["cookie"].is_object().then_some(()).ok_or("can not get cookies")?;
+    let mut result =
+        post_qrcode_result(client.clone(), qrcode_token["uid"].as_str().unwrap(), app).await?;
+    result["data"]["cookie"]
+        .is_object()
+        .then_some(())
+        .ok_or("can not get cookies")?;
     let cookies = result["data"]["cookie"].take();
-    Ok(cookies)
+    let mut cookies_value_list = Vec::new();
+    let key_list = vec!["UID", "CID", "SEID", "KID"];
+    for i in &key_list {
+        cookies_value_list.push(cookies[i].as_str().unwrap().to_string());
+    }
+    let cookie_str = cookies_value_list
+        .iter()
+        .enumerate()
+        .map(|(i, value)| format!("{}={}", key_list[i], value))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Ok(cookie_str)
 }
