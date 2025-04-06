@@ -1,13 +1,41 @@
-use std::{error::Error, sync::RwLock};
+use std::error::Error;
 
 use once_cell::sync::Lazy;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde_json::Value;
+use tokio::sync::RwLock;
+use sha2::{Digest, Sha256};
 
-use crate::config_manager::CONFIG;
-
-static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| reqwest::Client::new());
+use crate::{
+    CLIENT, COOKIE_WRITE, TX,
+    cloud_manager::update_cloud_cookies,
+    config_manager::{CONFIG, Message, MessageCmd, MessageType},
+};
 static TOKEN: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
+
+pub async fn get_alist_name_passwd() -> (String, String){
+    let mut name = String::new();
+    let mut password;
+    loop {
+        println!("Username:");
+        std::io::stdin()
+            .read_line(&mut name)
+            .expect("Failed to read username!");
+        name = name.trim().to_string();
+        let mut hasher = Sha256::new();
+        println!("Password:");
+        hasher.update(
+            rpassword::read_password().expect("Failed to read password")
+                + "-https://github.com/alist-org/alist",
+        );
+        password = hex::encode(hasher.finalize());
+        match get_alist_token(&name, &password).await {
+            Ok(_) => break,
+            Err(error) => eprintln!("{}", error),
+        }
+    }
+    (name, password)
+}
 
 pub async fn get_alist_token(username: &str, password: &str) -> Result<(), Box<dyn Error>> {
     let client = CLIENT.clone();
@@ -22,33 +50,92 @@ pub async fn get_alist_token(username: &str, password: &str) -> Result<(), Box<d
         .await?
         .text()
         .await?;
-    let response_json:Value = serde_json::from_str(&response)?;
-    if response_json["code"] == 200{
-        let mut token = TOKEN.write()?;
+    let response_json: Value = serde_json::from_str(&response)?;
+    if response_json["code"] == 200 {
+        let mut token = TOKEN.write().await;
         token.clear();
         token.push_str(response_json["data"]["token"].as_str().unwrap());
-    }else {
-        return Err("Wrong username or password".into())
+    } else {
+        return Err(response_json["message"]
+            .as_str()
+            .unwrap_or("Wrong username or password")
+            .into());
     }
     // println!("{}", TOKEN.read()?);
+    Ok(())
+}
+
+pub async fn get_file_raw_url(path: &str) -> Result<(String, String), Box<dyn Error>> {
+    let json_data = serde_json::json!({
+        "path": path,
+        "password": ""
+    });
+    let client = CLIENT.clone();
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, TOKEN.read().await.parse().unwrap());
+    let response = client
+        .post("http://127.0.0.1:5244/api/fs/get")
+        .headers(headers)
+        .json(&json_data)
+        .send()
+        .await?
+        .text()
+        .await?;
+    let response_json: Value = serde_json::from_str(&response)?;
+    if response_json["code"] == 200 {
+        let name = response_json["data"]["name"]
+            .as_str()
+            .ok_or("Can not find file name!")?
+            .to_string();
+        let raw_url = response_json["data"]["raw_url"]
+            .as_str()
+            .ok_or("Can not find file url!")?
+            .to_string();
+        Ok((name, raw_url))
+    } else {
+        Err(response_json["message"].as_str().unwrap().into())
+    }
+}
+
+pub async fn check_cookies() -> Result<(), Box<dyn Error>> {
+    let client = CLIENT.clone();
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, TOKEN.read().await.parse().unwrap());
+    let response = client
+        .get("http://127.0.0.1:5244/api/admin/storage/get?id=1")
+        .headers(headers)
+        .send()
+        .await?
+        .text()
+        .await?;
+    let response_json: Value = serde_json::from_str(&response)?;
+    println!("{}", response_json["data"]["status"]);
+    if response_json["data"]["status"].as_str().unwrap_or("error") != "work" {
+        eprintln!("{}", response_json["data"]["status"]);
+        println!("Cookies is expired, try to update...");
+        let cookies = update_cloud_cookies().await;
+        let tx = TX.read().await.clone().unwrap();
+        let msg = Message::new(
+            vec!["cookies".to_string()],
+            MessageType::Text(cookies),
+            MessageCmd::Replace,
+        );
+        tx.send(msg).unwrap();
+        COOKIE_WRITE.notified().await;
+        update_alist_cookies().await?;
+        println!("Cookies is now up to date!");
+    }
     Ok(())
 }
 
 pub async fn update_alist_cookies() -> Result<String, reqwest::Error> {
     let client = CLIENT.clone();
     let config_lock = CONFIG.read().await;
-    let cookie_str = config_lock.get_value()["cookies"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("; ");
+    let cookie_str = config_lock.get_value()["cookies"].as_str().unwrap();
     let addition_json = serde_json::json!({"cookie": cookie_str});
     let addition = addition_json.to_string();
-    let token = TOKEN.read().unwrap().clone();
     let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, token.parse().unwrap());
+    headers.insert(AUTHORIZATION, TOKEN.read().await.parse().unwrap());
     let json_data = serde_json::json!({
         "id": 1,
         "mount_path": "/115",
@@ -64,4 +151,28 @@ pub async fn update_alist_cookies() -> Result<String, reqwest::Error> {
         .await?
         .text()
         .await
+}
+
+pub async fn get_file_list(path: &str) -> Result<Value, Box<dyn Error>>{
+    let client = CLIENT.clone();
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, TOKEN.read().await.parse().unwrap());
+    let json_data = serde_json::json!({
+        "path": path,
+        "password": "",
+        "page": 1,
+        "per_page": 0,
+        "refresh": false,
+    });
+    let response = client
+        .post("http://127.0.0.1:5244/api/fs/list")
+        .headers(headers)
+        .json(&json_data)
+        .send()
+        .await?
+        .text()
+        .await?;
+    let mut response_json: Value = serde_json::from_str(&response)?;
+    let file_list = response_json["data"]["content"].take();
+    Ok(file_list)
 }
