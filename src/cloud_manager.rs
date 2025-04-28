@@ -1,26 +1,19 @@
 use crate::{
-    CLIENT, CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, config_manager::CONFIG,
+    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, config_manager::CONFIG,
     login_with_qrcode::login_with_qrcode,
 };
-use core::hash;
-use futures::future::{join_all, ok};
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::{
-    Client,
-    header::{
-        ACCEPT_RANGES, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap,
-        USER_AGENT,
-    },
-};
+use reqwest::header::{
+        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap,
+    };
 use serde_json::Value;
-use std::{cell::Cell, collections::HashMap, error::Error, sync::Arc};
-use tokio::io::{AsyncSeekExt, SeekFrom};
-use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
+use std::{cell::Cell, collections::HashMap, error::Error, path::Path};
+use tokio::{fs, io::AsyncWriteExt};
 use tokio_retry::{Retry, strategy::FixedInterval};
 
 pub const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800323d) NetType/WIFI Language/zh_CN";
 
-pub async fn update_cloud_cookies() -> String {
+pub async fn get_cloud_cookies() -> String {
     let try_times = Cell::new(0);
     match Retry::spawn(FixedInterval::from_millis(5000).take(5), async || {
         if try_times.get() > 0 {
@@ -39,13 +32,13 @@ pub async fn update_cloud_cookies() -> String {
     }
 }
 
-pub async fn download_file(url: &str, name: &str) -> Result<(), Box<dyn Error>> {
+pub async fn download_file(url: &str, path: &Path) -> Result<(), anyhow::Error> {
     let client = CLIENT_DOWNLOAD.clone();
     let mut response = client.get(url).send().await?;
     let content_length = response
         .headers()
         .get(CONTENT_LENGTH)
-        .ok_or("Can not download")?
+        .ok_or_else(|| anyhow::Error::msg("Can not download"))?
         .to_str()?
         .parse::<u64>()?;
     let progress = ProgressBar::new(content_length);
@@ -53,7 +46,8 @@ pub async fn download_file(url: &str, name: &str) -> Result<(), Box<dyn Error>> 
         ProgressStyle::default_bar()
             .template("{wide_bar} {bytes} / {total_bytes} ({binary_bytes_per_sec}  eta: {eta})")?,
     );
-    let mut file = fs::File::create(name).await?;
+    fs::create_dir_all(path.parent().unwrap()).await?;
+    let mut file = fs::File::create(path).await?;
     while let Some(data) = response.chunk().await? {
         file.write_all(&data).await?;
         progress.inc(data.len() as u64);
@@ -63,7 +57,7 @@ pub async fn download_file(url: &str, name: &str) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-pub async fn cloud_download(urls: &Vec<String>) -> Result<Vec<String>, Box<dyn Error>> {
+pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, anyhow::Error> {
     let client = CLIENT_WITH_RETRY.clone();
     let config_lock = CONFIG.read().await;
     let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
@@ -75,18 +69,17 @@ pub async fn cloud_download(urls: &Vec<String>) -> Result<Vec<String>, Box<dyn E
         "application/x-www-form-urlencoded".parse().unwrap(),
     );
     headers.insert(COOKIE, cookies.parse().unwrap());
-    // headers.insert(USER_AGENT, UA.parse().unwrap());
     let params = serde_json::json!({
         "ct": "lixian",
         "ac": "add_task_urls",
     });
     let mut data = HashMap::new();
-    for (index, url) in urls.into_iter().enumerate() {
+    for (index, url) in urls.iter().enumerate() {
         data.insert(format!("url[{index}]"), url);
     }
     let response = client
         .post("https://115.com/web/lixian/")
-        // .headers(headers)
+        .headers(headers)
         .query(&params)
         .form(&data)
         .send()
@@ -97,21 +90,17 @@ pub async fn cloud_download(urls: &Vec<String>) -> Result<Vec<String>, Box<dyn E
     if response_json["errcode"] == 0 || response_json["errcode"] == 10008 {
         let result = response_json["result"]
             .as_array()
-            .ok_or("can not get result")?
+            .ok_or_else(|| anyhow::Error::msg("can not get result"))?
             .iter()
             .map(|i| i["info_hash"].as_str().unwrap().to_string())
             .collect();
-        // for i in &result {
-        //     println!("{i}");
-        // }
-        // println!("{}", response);
         Ok(result)
     } else {
-        Err(response.into())
+        Err(anyhow::anyhow!(response))
     }
 }
 
-pub async fn del_cloud_task(hash: &str) -> Result<(), Box<dyn Error>> {
+pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
     let client = CLIENT_WITH_RETRY.clone();
     let config_lock = CONFIG.read().await;
     let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
@@ -158,22 +147,18 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), Box<dyn Error>> {
         println!("{:?}", response_json);
         Ok(())
     } else {
-        Err(response.into())
+        Err(anyhow::anyhow!(response))
     }
 }
 
-pub async fn get_tasks_list() -> Result<Vec<Value>, Box<dyn Error>> {
+pub async fn get_tasks_list() -> Result<Vec<Value>, anyhow::Error> {
     let client = CLIENT_WITH_RETRY.clone();
     let config_lock = CONFIG.read().await;
     let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
-    let downloading_dict = &config_lock.get_value()["downloading"];
+    let downloading_dict = &config_lock.get_value()["downloading_hash"];
     let hash_list = downloading_dict
-        .as_object()
-        .unwrap()
-        .values()
-        .map(|value| value.as_array().unwrap())
-        .flatten()
-        .collect::<Vec<_>>();
+        .as_array()
+        .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert(HOST, "115.com".parse().unwrap());
     headers.insert(CONNECTION, "keep-alive".parse().unwrap());
@@ -195,13 +180,13 @@ pub async fn get_tasks_list() -> Result<Vec<Value>, Box<dyn Error>> {
     // println!("{}", response_json);
     let pages = response_json["page_count"]
         .as_i64()
-        .ok_or("Can not find page_count")?;
+        .ok_or_else(|| anyhow::Error::msg("Can not find page_count"))?;
     let tasks = response_json["tasks"]
         .as_array_mut()
-        .ok_or("Can not get tasks list")?;
+        .ok_or_else(|| anyhow::Error::msg("Can not get tasks list"))?;
     let mut current_tasks = tasks
-        .into_iter()
-        .filter(|task| hash_list.iter().any(|hash| **hash == task["info_hash"]))
+        .iter_mut()
+        .filter(|task| hash_list.iter().any(|hash| *hash == task["info_hash"]))
         .map(|task| task.take())
         .collect::<Vec<_>>();
     let mut page: i64 = 1;
@@ -218,10 +203,10 @@ pub async fn get_tasks_list() -> Result<Vec<Value>, Box<dyn Error>> {
             .await?;
         let mut response_json: Value = serde_json::from_str(&response)?;
         let mut tasks_value = response_json["tasks"].take();
-        let tasks = tasks_value.as_array_mut().ok_or("Can not get tasks list")?;
+        let tasks = tasks_value.as_array_mut().ok_or_else(|| anyhow::Error::msg("Can not get tasks list"))?;
         let mut left_tasks = tasks
-            .into_iter()
-            .filter(|task| hash_list.iter().any(|hash| **hash == task["info_hash"]))
+            .iter_mut()
+            .filter(|task| hash_list.iter().any(|hash| *hash == task["info_hash"]))
             .map(|task| task.take())
             .collect::<Vec<_>>();
         current_tasks.append(&mut left_tasks);
