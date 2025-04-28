@@ -14,7 +14,7 @@ use config_manager::Message;
 use once_cell::sync::Lazy;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
-use tokio::sync::{mpsc::UnboundedSender, Notify, RwLock};
+use tokio::{sync::{mpsc::UnboundedSender, Mutex, Notify, RwLock}, task::JoinHandle};
 pub const PC_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -45,5 +45,5 @@ pub static CLIENT_WITH_RETRY: Lazy<ClientWithMiddleware> = Lazy::new(|| {
     .build()
 });
 pub static TX: Lazy<RwLock<Option<UnboundedSender<Message>>>> = Lazy::new(|| RwLock::new(None));
-pub static COOKIE_WRITE: Lazy<Notify> = Lazy::new(||Notify::new());
 pub static ERROR_STATUS: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
+pub static REFRESH_DOWNLOAD: Lazy<Mutex<Option<JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
