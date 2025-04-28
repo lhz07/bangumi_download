@@ -1,15 +1,12 @@
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::sync::Arc;
-use std::{error::Error, path::Path};
+use std::path::Path;
 use tokio::fs;
-use tokio::sync::{mpsc, Notify, RwLock};
+use tokio::sync::{Notify, RwLock, mpsc};
 
 use crate::alist_manager::update_alist_cookies;
-use crate::{
-    ERROR_STATUS, alist_manager::get_alist_name_passwd,
-    cloud_manager::get_cloud_cookies,
-};
+use crate::{ERROR_STATUS, alist_manager::get_alist_name_passwd, cloud_manager::get_cloud_cookies};
 
 pub static CONFIG: Lazy<RwLock<Config>> = Lazy::new(|| RwLock::new(Config::new()));
 
@@ -49,8 +46,18 @@ impl MessageType {
 }
 
 impl Message {
-    pub fn new(keys: Vec<String>, value: MessageType, cmd: MessageCmd, notify: Option<Arc<Notify>>) -> Self {
-        Self { keys, value, cmd, notify }
+    pub fn new(
+        keys: Vec<String>,
+        value: MessageType,
+        cmd: MessageCmd,
+        notify: Option<Arc<Notify>>,
+    ) -> Self {
+        Self {
+            keys,
+            value,
+            cmd,
+            notify,
+        }
     }
 }
 
@@ -121,7 +128,7 @@ impl Config {
             default_config
         };
         *CONFIG.write().await = Config { data };
-        if sync_cookies{
+        if sync_cookies {
             update_alist_cookies().await.unwrap();
         }
         Ok(())

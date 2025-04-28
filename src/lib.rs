@@ -2,8 +2,8 @@ pub mod alist_manager;
 pub mod cloud_manager;
 pub mod config_manager;
 pub mod login_with_qrcode;
-pub mod update_rss;
 pub mod main_proc;
+pub mod update_rss;
 
 #[cfg(test)]
 pub mod tests;
@@ -14,7 +14,10 @@ use config_manager::Message;
 use once_cell::sync::Lazy;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
-use tokio::{sync::{mpsc::UnboundedSender, Mutex, Notify, RwLock}, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, RwLock, mpsc::UnboundedSender},
+    task::JoinHandle,
+};
 pub const PC_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()

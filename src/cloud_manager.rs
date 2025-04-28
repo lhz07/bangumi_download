@@ -3,11 +3,9 @@ use crate::{
     login_with_qrcode::login_with_qrcode,
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::header::{
-        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap,
-    };
+use reqwest::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap};
 use serde_json::Value;
-use std::{cell::Cell, collections::HashMap, error::Error, path::Path};
+use std::{cell::Cell, collections::HashMap, path::Path};
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_retry::{Retry, strategy::FixedInterval};
 
@@ -156,9 +154,7 @@ pub async fn get_tasks_list() -> Result<Vec<Value>, anyhow::Error> {
     let config_lock = CONFIG.read().await;
     let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
     let downloading_dict = &config_lock.get_value()["downloading_hash"];
-    let hash_list = downloading_dict
-        .as_array()
-        .unwrap();
+    let hash_list = downloading_dict.as_array().unwrap();
     let mut headers = HeaderMap::new();
     headers.insert(HOST, "115.com".parse().unwrap());
     headers.insert(CONNECTION, "keep-alive".parse().unwrap());
@@ -203,7 +199,9 @@ pub async fn get_tasks_list() -> Result<Vec<Value>, anyhow::Error> {
             .await?;
         let mut response_json: Value = serde_json::from_str(&response)?;
         let mut tasks_value = response_json["tasks"].take();
-        let tasks = tasks_value.as_array_mut().ok_or_else(|| anyhow::Error::msg("Can not get tasks list"))?;
+        let tasks = tasks_value
+            .as_array_mut()
+            .ok_or_else(|| anyhow::Error::msg("Can not get tasks list"))?;
         let mut left_tasks = tasks
             .iter_mut()
             .filter(|task| hash_list.iter().any(|hash| *hash == task["info_hash"]))

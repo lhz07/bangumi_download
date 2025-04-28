@@ -1,5 +1,8 @@
 use crate::{
-    cloud_manager::cloud_download, config_manager::{Message, MessageCmd, MessageType, CONFIG}, main_proc::{refresh_download, restart_refresh_download}, CLIENT_WITH_RETRY, ERROR_STATUS, TX
+    CLIENT_WITH_RETRY, ERROR_STATUS, TX,
+    cloud_manager::cloud_download,
+    config_manager::{CONFIG, Message, MessageCmd, MessageType},
+    main_proc::restart_refresh_download,
 };
 use futures::future::{self, join_all};
 use reqwest_middleware::ClientWithMiddleware;
@@ -9,7 +12,7 @@ use std::{
     sync::{Arc, atomic::AtomicI32},
     vec,
 };
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio_retry::{Retry, strategy::FibonacciBackoff};
 
 async fn get_response_text(
@@ -175,7 +178,7 @@ pub async fn get_a_magnet_link(url: &str) -> Option<String> {
     {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("can not open {url}, error: {error}, already tried 5 times");
+            eprintln!("can not open {url}, error: {error}, already tried 3 times");
             return None;
         }
     };
@@ -328,8 +331,8 @@ pub async fn rss_receive(
                 tx.send(msg).unwrap();
                 let msg = Message::new(
                     vec!["magnets".to_string(), title.to_string()],
-                    MessageType::List(vec![]),
-                    MessageCmd::Replace,
+                    MessageType::None,
+                    MessageCmd::DeleteKey,
                     None,
                 );
                 tx.send(msg).unwrap();

@@ -1,18 +1,23 @@
-use std::{error::Error, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde_json::Value;
-use tokio::sync::{Notify, RwLock};
 use sha2::{Digest, Sha256};
+use tokio::sync::{Notify, RwLock};
 
 use crate::{
-    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, MessageCmd, MessageType, CONFIG}, CLIENT, TX
+    CLIENT, TX,
+    cloud_manager::{download_file, get_cloud_cookies},
+    config_manager::{CONFIG, Message, MessageCmd, MessageType},
 };
 static TOKEN: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
-pub async fn get_alist_name_passwd() -> (String, String){
+pub async fn get_alist_name_passwd() -> (String, String) {
     let mut name = String::new();
     let mut password;
     loop {
@@ -55,9 +60,12 @@ pub async fn get_alist_token(username: &str, password: &str) -> Result<(), anyho
         token.clear();
         token.push_str(response_json["data"]["token"].as_str().unwrap());
     } else {
-        return Err(anyhow!(response_json["message"]
-        .as_str()
-        .unwrap_or("Wrong username or password").to_string())); // Return the error
+        return Err(anyhow!(
+            response_json["message"]
+                .as_str()
+                .unwrap_or("Wrong username or password")
+                .to_string()
+        )); // Return the error
     }
     // println!("{}", TOKEN.read()?);
     Ok(())
@@ -91,7 +99,9 @@ pub async fn get_file_raw_url(path: &str) -> Result<(String, String), anyhow::Er
             .to_string();
         Ok((name, raw_url))
     } else {
-        Err(anyhow!(response_json["message"].as_str().unwrap().to_string()))
+        Err(anyhow!(
+            response_json["message"].as_str().unwrap().to_string()
+        ))
     }
 }
 
@@ -153,7 +163,7 @@ pub async fn update_alist_cookies() -> Result<String, reqwest::Error> {
         .await
 }
 
-pub async fn get_file_list(path: &str) -> Result<Value, anyhow::Error>{
+pub async fn get_file_list(path: &str) -> Result<Value, anyhow::Error> {
     let client = CLIENT.clone();
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, TOKEN.read().await.parse().unwrap());
@@ -177,7 +187,7 @@ pub async fn get_file_list(path: &str) -> Result<Value, anyhow::Error>{
     Ok(file_list)
 }
 
-pub async fn download_a_task(path: &str, ani_name: &str) -> Result<(), anyhow::Error>{
+pub async fn download_a_task(path: &str, ani_name: &str) -> Result<(), anyhow::Error> {
     let (name, url) = get_file_raw_url(path).await?;
     let mut storge_path = PathBuf::new();
     storge_path.push("downloads/115");

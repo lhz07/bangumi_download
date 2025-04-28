@@ -1,7 +1,11 @@
 use std::{collections::HashMap, time::Duration, vec};
 
 use crate::{
-    alist_manager::{download_a_task, get_alist_name_passwd, get_alist_token, get_file_raw_url}, cloud_manager::{del_cloud_task, get_tasks_list}, config_manager::{Message, MessageCmd, MessageType, CONFIG}, update_rss::start_rss_receive, REFRESH_DOWNLOAD, TX
+    REFRESH_DOWNLOAD, TX,
+    alist_manager::{download_a_task, get_alist_name_passwd, get_alist_token},
+    cloud_manager::{del_cloud_task, get_tasks_list},
+    config_manager::{CONFIG, Message, MessageCmd, MessageType},
+    update_rss::start_rss_receive,
 };
 
 pub async fn refresh_rss() {
@@ -91,13 +95,14 @@ pub async fn refresh_download() {
                         .entry(task["info_hash"].as_str().unwrap().to_string())
                         .and_modify(|times| *times += 1)
                         .or_insert(1);
-                    if error_task[task["info_hash"].as_str().unwrap()] > 3  {
+                    if error_task[task["info_hash"].as_str().unwrap()] > 3 {
                         break 'outer;
                     }
                     tokio::time::sleep(Duration::from_secs(60)).await;
                     continue;
                 }
                 // after download
+                println!("Task {} is finished! Deleting task!", task["name"]);
                 del_cloud_task(task["info_hash"].as_str().unwrap())
                     .await
                     .unwrap();
@@ -127,8 +132,8 @@ pub async fn refresh_download() {
     }
 }
 
-pub async fn restart_refresh_download(){
-    if let Some(_) = REFRESH_DOWNLOAD.lock().await.take_if(|h|h.is_finished()) {
+pub async fn restart_refresh_download() {
+    if let Some(_) = REFRESH_DOWNLOAD.lock().await.take_if(|h| h.is_finished()) {
         let download_handle = tokio::spawn(refresh_download());
         REFRESH_DOWNLOAD.lock().await.replace(download_handle);
     }

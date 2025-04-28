@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use qrcode::QrCode;
 use serde_json::Value;
-use std::error::Error;
 
 // const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];
 
@@ -56,7 +55,9 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, anyhow::Error> {
         .as_object_mut()
         .ok_or_else(|| anyhow::Error::msg("can not get dict!"))?
         .remove("qrcode");
-    let qrcode = qrcode_value.as_str().ok_or_else(|| anyhow::Error::msg("can not find qrcode url"))?;
+    let qrcode = qrcode_value
+        .as_str()
+        .ok_or_else(|| anyhow::Error::msg("can not find qrcode url"))?;
     let code = QrCode::new(qrcode.as_bytes())?;
     let code_string = code
         .render::<char>()
