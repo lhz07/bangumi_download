@@ -1,14 +1,8 @@
 use bangumi_download::{
-    TX,
     alist_manager::{
-        check_cookies, get_alist_token, get_file_list, get_file_raw_url, update_alist_cookies,
-    },
-    cloud_manager::{cloud_download, del_cloud_task, download_file, get_tasks_list},
-    config_manager::{CONFIG, Config, Message, MessageCmd, MessageType, modify_config},
-    update_rss::{get_a_magnet_link, get_all_episode_magnet_links, start_rss_receive},
+        check_cookies, download_a_task, get_alist_token, get_file_list, get_file_raw_url,
+    }, cloud_manager::download_file, config_manager::{modify_config, Config, Message, MessageCmd, MessageType, CONFIG}, main_proc::{refresh_download, refresh_rss}, update_rss::rss_receive, CLIENT_WITH_RETRY, REFRESH_DOWNLOAD, TX
 };
-use futures::FutureExt;
-use serde_json::Value;
 
 #[tokio::main]
 async fn main() {
@@ -26,9 +20,14 @@ async fn main() {
     let config_manager = tokio::spawn(modify_config(rx));
     // -------------------------------------------------------------------------
 
-
-    let username = CONFIG.read().await.get_value()["user"]["name"].as_str().unwrap().to_string();
-    let password = CONFIG.read().await.get_value()["user"]["password"].as_str().unwrap().to_string();
+    let username = CONFIG.read().await.get_value()["user"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let password = CONFIG.read().await.get_value()["user"]["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
     println!("{:?}", get_alist_token(&username, &password).await);
     println!("{:?}", check_cookies().await);
     // match get_tasks_list().await{
@@ -42,8 +41,7 @@ async fn main() {
     // }
     // println!("{:?}", get_file_list("/115/云下载").await);
     // println!("{:?}", del_cloud_task("e5f48854a62160fa29509c759e71b13dfd7f416b").await);
-    let (name, url) = get_file_raw_url("/115/云下载/[LoliHouse] Kono Kaisha ni Suki na Hito ga Imasu - 06 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv/[LoliHouse] Kono Kaisha ni Suki na Hito ga Imasu - 06 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv").await.unwrap();
-    println!("{:?}", download_file(&url, &name).await);
+    // println!("{:?}", download_a_task("/115/云下载/[LoliHouse] Kono Kaisha ni Suki na Hito ga Imasu - 01 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv/[LoliHouse] Kono Kaisha ni Suki na Hito ga Imasu - 01 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv", "ani_name").await);
     // tokio::runtime::Runtime::new().unwrap().block_on(async {
     // let config = CONFIG.read().await.get_value()["user"].clone();
     // println!("{:?}", get_alist_token(config["name"].as_str().unwrap(), config["password"].as_str().unwrap()).await);
@@ -67,11 +65,34 @@ async fn main() {
     // });
     // println!("{:?}", test_download());
     // println!("{:?}", CONFIG.read().await);
+    let _rss_refresh_handle = tokio::spawn(refresh_rss());
+    if CONFIG.read().await.get_value()["downloading_hash"].as_array().unwrap().len() > 0 {
+        let download_handle = tokio::spawn(refresh_download());
+        REFRESH_DOWNLOAD.lock().await.replace(download_handle);
+    }
     loop {
+        println!(
+            "\n请输入想要执行的操作: \n1.添加RSS链接\n2.删除RSS链接\n3.添加字幕组过滤器\n4.删除字幕组过滤器\n5.添加单个磁链下载\n6.退出程序\n"
+        );
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).unwrap();
         let select = input.trim();
         match select {
+            "1" => {
+                println!("请输入要添加的RSS链接:");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).unwrap();
+                let rss_link = input.trim();
+                if rss_link.is_empty() {
+                    println!("RSS链接不能为空");
+                    continue;
+                }
+                let tx = TX.read().await.clone().unwrap();
+                let old_config = CONFIG.read().await.get_value().clone();
+                rss_receive(tx, rss_link, &old_config, CLIENT_WITH_RETRY.clone())
+                    .await
+                    .unwrap();
+            }
             "6" => {
                 println!("正在退出...");
                 break;

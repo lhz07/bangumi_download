@@ -1,15 +1,14 @@
 use once_cell::sync::Lazy;
 use serde_json::Value;
-use std::{error::Error, path::Path, vec};
-use tokio::{
-    fs::{self},
-    sync::{RwLock, mpsc},
-};
+use std::sync::Arc;
+use std::{error::Error, path::Path};
+use tokio::fs;
+use tokio::sync::{mpsc, Notify, RwLock};
 
+use crate::alist_manager::update_alist_cookies;
 use crate::{
-    COOKIE_WRITE, ERROR_STATUS,
-    alist_manager::{get_alist_name_passwd, get_alist_token},
-    cloud_manager::update_cloud_cookies,
+    ERROR_STATUS, alist_manager::get_alist_name_passwd,
+    cloud_manager::get_cloud_cookies,
 };
 
 pub static CONFIG: Lazy<RwLock<Config>> = Lazy::new(|| RwLock::new(Config::new()));
@@ -19,6 +18,7 @@ pub struct Message {
     keys: Vec<String>,
     value: MessageType,
     cmd: MessageCmd,
+    notify: Option<Arc<Notify>>,
 }
 
 #[derive(Debug)]
@@ -41,9 +41,7 @@ impl MessageType {
     pub fn to_value(self) -> Value {
         match self {
             Self::Text(text) => Value::String(text),
-            Self::List(list) => {
-                Value::Array(list.into_iter().map(|item| Value::String(item)).collect())
-            }
+            Self::List(list) => Value::Array(list.into_iter().map(Value::String).collect()),
             Self::Map(map) => Value::Object(map),
             Self::None => Value::Null,
         }
@@ -51,8 +49,8 @@ impl MessageType {
 }
 
 impl Message {
-    pub fn new(keys: Vec<String>, value: MessageType, cmd: MessageCmd) -> Self {
-        Self { keys, value, cmd }
+    pub fn new(keys: Vec<String>, value: MessageType, cmd: MessageCmd, notify: Option<Arc<Notify>>) -> Self {
+        Self { keys, value, cmd, notify }
     }
 }
 
@@ -88,9 +86,10 @@ impl Config {
         &mut self.data
     }
 
-    pub async fn initial_config() -> Result<(), Box<dyn Error>> {
+    pub async fn initial_config() -> Result<(), anyhow::Error> {
         let path = Path::new("config.json");
         let mut old_json = String::new();
+        let mut sync_cookies = false;
         if path.exists() {
             old_json = std::fs::read_to_string(path).expect("can not read config.json");
         }
@@ -111,7 +110,8 @@ impl Config {
         } else {
             // get username and password
             let (name, password) = get_alist_name_passwd().await;
-            let cookies = update_cloud_cookies().await;
+            let cookies = get_cloud_cookies().await;
+            sync_cookies = true;
             let default_config = serde_json::json!({"user":{"name":name, "password": password},"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "magnets":{}, "downloading_hash": [], "hash_ani": {}, "temp": {}, "files_to_download": {}});
             let default_json = serde_json::to_string_pretty(&default_config).unwrap();
             std::fs::write(path, default_json).unwrap_or_else(|error| {
@@ -121,6 +121,9 @@ impl Config {
             default_config
         };
         *CONFIG.write().await = Config { data };
+        if sync_cookies{
+            update_alist_cookies().await.unwrap();
+        }
         Ok(())
     }
 }
@@ -189,17 +192,17 @@ pub async fn modify_config(mut rx: mpsc::UnboundedReceiver<Message>) {
         println!("try to write");
         *CONFIG.write().await.get_mut_value() = new_config.clone();
         println!("wrote!");
-        if msg.keys.first().unwrap() == "cookies" {
-            COOKIE_WRITE.notify_one();
+        if let Some(notify) = msg.notify {
+            notify.notify_one();
             println!("notify the thread");
         }
         #[cfg(not(test))]
         {
-        let new_config =
-            serde_json::to_string_pretty(&new_config).expect("can not serialize new config");
-        fs::write("config.json", new_config)
-            .await
-            .expect("can not write new config");
+            let new_config =
+                serde_json::to_string_pretty(&new_config).expect("can not serialize new config");
+            fs::write("config.json", new_config)
+                .await
+                .expect("can not write new config");
         }
     }
     #[cfg(not(test))]

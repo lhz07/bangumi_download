@@ -38,6 +38,7 @@ async fn append_map() {
         vec!["filter".to_string()],
         config_manager::MessageType::Map(map1),
         config_manager::MessageCmd::Append,
+        None,
     );
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
@@ -66,6 +67,7 @@ async fn append_text_to_vec() {
         vec!["filter".to_string(), "611".to_string()],
         config_manager::MessageType::Text("简日内嵌".to_string()),
         config_manager::MessageCmd::Append,
+        None,
     );
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
@@ -94,6 +96,7 @@ async fn del_key() {
         vec!["filter".to_string(), "233".to_string()],
         config_manager::MessageType::None,
         config_manager::MessageCmd::DeleteKey,
+        None,
     );
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
@@ -122,6 +125,7 @@ async fn del_value() {
         vec!["filter".to_string(), "default".to_string()],
         config_manager::MessageType::Text("简体".to_string()),
         config_manager::MessageCmd::DeleteValue,
+        None,
     );
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
@@ -150,6 +154,7 @@ async fn append_vec_to_vec() {
         vec!["filter".to_string(), "611".to_string()],
         config_manager::MessageType::List(vec!["简日内嵌".to_string(), "CHS".to_string()]),
         config_manager::MessageCmd::Append,
+        None,
     );
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
@@ -178,6 +183,7 @@ async fn replace_vec() {
         vec!["filter".to_string(), "default".to_string()],
         config_manager::MessageType::List(vec!["简日内嵌".to_string()]),
         config_manager::MessageCmd::Replace,
+        None,
     );
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
@@ -206,6 +212,7 @@ async fn replace_text() {
         vec!["user".to_string(), "name".to_string()],
         config_manager::MessageType::Text("master".to_string()),
         config_manager::MessageCmd::Replace,
+        None,
     );
     let expect_result = serde_json::json!(
         {"user":{"name":"master", "password": ""},
