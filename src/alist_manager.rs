@@ -1,15 +1,14 @@
-use std::error::Error;
+use std::{error::Error, path::{Path, PathBuf}, sync::Arc};
 
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde_json::Value;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CLIENT, COOKIE_WRITE, TX,
-    cloud_manager::update_cloud_cookies,
-    config_manager::{CONFIG, Message, MessageCmd, MessageType},
+    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, MessageCmd, MessageType, CONFIG}, CLIENT, TX
 };
 static TOKEN: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
@@ -37,7 +36,7 @@ pub async fn get_alist_name_passwd() -> (String, String){
     (name, password)
 }
 
-pub async fn get_alist_token(username: &str, password: &str) -> Result<(), Box<dyn Error>> {
+pub async fn get_alist_token(username: &str, password: &str) -> Result<(), anyhow::Error> {
     let client = CLIENT.clone();
     let body = serde_json::json!({
         "username": username,
@@ -56,16 +55,15 @@ pub async fn get_alist_token(username: &str, password: &str) -> Result<(), Box<d
         token.clear();
         token.push_str(response_json["data"]["token"].as_str().unwrap());
     } else {
-        return Err(response_json["message"]
-            .as_str()
-            .unwrap_or("Wrong username or password")
-            .into());
+        return Err(anyhow!(response_json["message"]
+        .as_str()
+        .unwrap_or("Wrong username or password").to_string())); // Return the error
     }
     // println!("{}", TOKEN.read()?);
     Ok(())
 }
 
-pub async fn get_file_raw_url(path: &str) -> Result<(String, String), Box<dyn Error>> {
+pub async fn get_file_raw_url(path: &str) -> Result<(String, String), anyhow::Error> {
     let json_data = serde_json::json!({
         "path": path,
         "password": ""
@@ -85,19 +83,19 @@ pub async fn get_file_raw_url(path: &str) -> Result<(String, String), Box<dyn Er
     if response_json["code"] == 200 {
         let name = response_json["data"]["name"]
             .as_str()
-            .ok_or("Can not find file name!")?
+            .ok_or_else(|| anyhow::Error::msg("Can not find file name!"))?
             .to_string();
         let raw_url = response_json["data"]["raw_url"]
             .as_str()
-            .ok_or("Can not find file url!")?
+            .ok_or_else(|| anyhow::Error::msg("Can not find file url!"))?
             .to_string();
         Ok((name, raw_url))
     } else {
-        Err(response_json["message"].as_str().unwrap().into())
+        Err(anyhow!(response_json["message"].as_str().unwrap().to_string()))
     }
 }
 
-pub async fn check_cookies() -> Result<(), Box<dyn Error>> {
+pub async fn check_cookies() -> Result<(), anyhow::Error> {
     let client = CLIENT.clone();
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, TOKEN.read().await.parse().unwrap());
@@ -113,15 +111,17 @@ pub async fn check_cookies() -> Result<(), Box<dyn Error>> {
     if response_json["data"]["status"].as_str().unwrap_or("error") != "work" {
         eprintln!("{}", response_json["data"]["status"]);
         println!("Cookies is expired, try to update...");
-        let cookies = update_cloud_cookies().await;
+        let cookies = get_cloud_cookies().await;
         let tx = TX.read().await.clone().unwrap();
+        let notify = Arc::new(Notify::new());
         let msg = Message::new(
             vec!["cookies".to_string()],
             MessageType::Text(cookies),
             MessageCmd::Replace,
+            Some(notify.clone()),
         );
         tx.send(msg).unwrap();
-        COOKIE_WRITE.notified().await;
+        notify.notified().await;
         update_alist_cookies().await?;
         println!("Cookies is now up to date!");
     }
@@ -153,7 +153,7 @@ pub async fn update_alist_cookies() -> Result<String, reqwest::Error> {
         .await
 }
 
-pub async fn get_file_list(path: &str) -> Result<Value, Box<dyn Error>>{
+pub async fn get_file_list(path: &str) -> Result<Value, anyhow::Error>{
     let client = CLIENT.clone();
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, TOKEN.read().await.parse().unwrap());
@@ -175,4 +175,14 @@ pub async fn get_file_list(path: &str) -> Result<Value, Box<dyn Error>>{
     let mut response_json: Value = serde_json::from_str(&response)?;
     let file_list = response_json["data"]["content"].take();
     Ok(file_list)
+}
+
+pub async fn download_a_task(path: &str, ani_name: &str) -> Result<(), anyhow::Error>{
+    let (name, url) = get_file_raw_url(path).await?;
+    let mut storge_path = PathBuf::new();
+    storge_path.push("downloads/115");
+    storge_path.push(&ani_name);
+    storge_path.push(&name);
+    download_file(&url, &storge_path).await?;
+    Ok(())
 }
