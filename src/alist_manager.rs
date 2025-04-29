@@ -11,9 +11,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, RwLock};
 
 use crate::{
-    CLIENT, TX,
-    cloud_manager::{download_file, get_cloud_cookies},
-    config_manager::{CONFIG, Message, MessageCmd, MessageType},
+    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, MessageCmd, MessageType, CONFIG}, CLIENT, CLIENT_WITH_RETRY, TX
 };
 static TOKEN: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
@@ -195,4 +193,18 @@ pub async fn download_a_task(path: &str, ani_name: &str) -> Result<(), anyhow::E
     storge_path.push(&name);
     download_file(&url, &storge_path).await?;
     Ok(())
+}
+
+pub async fn check_is_alist_working() -> Result<(), anyhow::Error> {
+    let client = CLIENT.clone();
+    match client.get("http://127.0.0.1:5244").send().await{
+        Ok(response) => {
+            if response.status() == 200 {
+                Ok(())
+            } else {
+                Err(anyhow!("Alist is not working! Response: {response:?}"))
+            }
+        }
+        Err(_) => Err(anyhow!("Can not connect to Alist! Is it running?"))
+    }
 }

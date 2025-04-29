@@ -1,15 +1,18 @@
 use bangumi_download::{
-    CLIENT_WITH_RETRY, REFRESH_DOWNLOAD, TX,
     alist_manager::{
-        check_cookies, get_alist_token,
-    },
-    config_manager::{CONFIG, Config, Message, modify_config},
-    main_proc::{refresh_download, refresh_rss},
-    update_rss::rss_receive,
+        check_cookies, check_is_alist_working, get_alist_token
+    }, config_manager::{modify_config, Config, Message, CONFIG}, main_proc::{refresh_download, refresh_rss}, update_rss::rss_receive, CLIENT_WITH_RETRY, REFRESH_DOWNLOAD, TX
 };
 
 #[tokio::main]
 async fn main() {
+    match check_is_alist_working().await{
+        Ok(_) => println!("alist is working"),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
     // -------------------------------------------------------------------------
     // initial config
     if let Err(error) = Config::initial_config().await {
@@ -32,15 +35,8 @@ async fn main() {
     println!("{:?}", get_alist_token(&username, &password).await);
     println!("{:?}", check_cookies().await);
     let _rss_refresh_handle = tokio::spawn(refresh_rss());
-    if CONFIG.read().await.get_value()["downloading_hash"]
-        .as_array()
-        .unwrap()
-        .len()
-        > 0
-    {
-        let download_handle = tokio::spawn(refresh_download());
-        REFRESH_DOWNLOAD.lock().await.replace(download_handle);
-    }
+    let download_handle = tokio::spawn(refresh_download());
+    REFRESH_DOWNLOAD.lock().await.replace(download_handle);
     loop {
         println!(
             "\n请输入想要执行的操作: \n1.添加RSS链接\n2.删除RSS链接\n3.添加字幕组过滤器\n4.删除字幕组过滤器\n5.添加单个磁链下载\n6.退出程序\n"

@@ -52,50 +52,45 @@ pub async fn start_rss_receive(urls: Vec<&str>) {
 }
 
 pub fn filter_episode<'a>(items: &'a Vec<Value>, filter: &Value, sub_id: &str) -> Vec<&'a str> {
-    let default_filter = filter["default"].as_array().unwrap();
-    let mut item_links: Vec<&str> = Vec::new();
-    if filter.as_object().unwrap().contains_key(sub_id) {
-        let sub_filter = filter[&sub_id].as_array().unwrap();
-        item_links = items
+    let default_filters = filter["default"].as_array().unwrap();
+    let mut best_filter: Option<&str> = None;
+    let empty_filter: Vec<Value> = Vec::new();
+    let candidate_filters = match filter[&sub_id].as_array() {
+        Some(sub_filters) => sub_filters.iter().chain(default_filters.iter()),
+        None => empty_filter.iter().chain(default_filters),
+    };
+    'outer: for candidate_filter in candidate_filters {
+        for item in items {
+            if item["title"]
+                .as_str()
+                .unwrap()
+                .contains(candidate_filter.as_str().unwrap())
+            {
+                best_filter = Some(candidate_filter.as_str().unwrap());
+                break 'outer;
+            }
+        }
+    }
+    match best_filter {
+        Some(best_filter) => items
             .iter()
-            .filter(|item| {
-                sub_filter.iter().any(|key_filter| {
-                    item["title"]
-                        .as_str()
-                        .unwrap()
-                        .contains(key_filter.as_str().unwrap())
-                })
+            .filter_map(|item| {
+                if item["title"].as_str().unwrap().contains(best_filter) {
+                    println!("{}", item["title"].as_str().unwrap());
+                    Some(item["link"].as_str().unwrap())
+                } else {
+                    None
+                }
             })
+            .collect::<Vec<_>>(),
+        None => items
+            .iter()
             .map(|item| {
                 println!("{}", item["title"].as_str().unwrap());
                 item["link"].as_str().unwrap()
             })
-            .collect();
+            .collect::<Vec<_>>(),
     }
-    for i in items {
-        if i["title"].as_str().unwrap().contains("内封") {
-            item_links.push(i["link"].as_str().unwrap());
-            println!("{}", i["title"].as_str().unwrap());
-        }
-    }
-    if item_links.is_empty() {
-        for i in items {
-            for j in default_filter {
-                if i["title"].as_str().unwrap().contains(j.as_str().unwrap()) {
-                    item_links.push(i["link"].as_str().unwrap());
-                    println!("{}", i["title"].as_str().unwrap());
-                    break;
-                }
-            }
-        }
-    }
-    if item_links.is_empty() {
-        for i in items {
-            item_links.push(i["link"].as_str().unwrap());
-            println!("{}", i["title"].as_str().unwrap());
-        }
-    }
-    item_links
 }
 
 pub async fn get_all_episode_magnet_links(

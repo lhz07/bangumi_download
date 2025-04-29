@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::sync::Arc;
@@ -72,17 +73,17 @@ impl Config {
         Config { data }
     }
 
-    fn check_valid(json: &Value) -> Option<()> {
-        json["user"]["name"].is_string().then_some(())?;
-        json["bangumi"].is_object().then_some(())?;
-        json["cookies"].is_string().then_some(())?;
-        json["downloading_hash"].is_array().then_some(())?;
-        json["files_to_download"].is_object().then_some(())?;
-        json["filter"]["default"].is_array().then_some(())?;
-        json["rss_links"].is_object().then_some(())?;
-        json["temp"].is_object().then_some(())?;
-
-        Some(())
+    fn check_valid(json: &Value) -> Result<(), anyhow::Error> {
+        json["user"]["name"].is_string().then_some(()).ok_or_else(||anyhow!("missing user: name"))?;
+        json["bangumi"].is_object().then_some(()).ok_or_else(||anyhow!("missing bangumi"))?;
+        json["cookies"].is_string().then_some(()).ok_or_else(||anyhow!("missing cookies"))?;
+        json["downloading_hash"].is_array().then_some(()).ok_or_else(||anyhow!("missing downloading_hash"))?;
+        json["hash_ani"].is_object().then_some(()).ok_or_else(||anyhow!("missing hash_ani"))?;
+        json["files_to_download"].is_object().then_some(()).ok_or_else(||anyhow!("missing files_to_download"))?;
+        json["filter"]["default"].is_array().then_some(()).ok_or_else(||anyhow!("missing filter: default"))?;
+        json["rss_links"].is_object().then_some(()).ok_or_else(||anyhow!("missing rss_links"))?;
+        json["temp"].is_object().then_some(()).ok_or_else(||anyhow!("missing temp"))?;
+        Ok(())
     }
 
     pub fn get_value(&self) -> &Value {
@@ -108,9 +109,9 @@ impl Config {
                 std::process::exit(1);
             });
             match Self::check_valid(&json) {
-                Some(()) => json,
-                None => {
-                    eprintln!("Some data of config.json is missing!");
+                Ok(()) => json,
+                Err(error) => {
+                    eprintln!("config.json is {error}");
                     std::process::exit(1);
                 }
             }
@@ -119,7 +120,7 @@ impl Config {
             let (name, password) = get_alist_name_passwd().await;
             let cookies = get_cloud_cookies().await;
             sync_cookies = true;
-            let default_config = serde_json::json!({"user":{"name":name, "password": password},"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "magnets":{}, "downloading_hash": [], "hash_ani": {}, "temp": {}, "files_to_download": {}});
+            let default_config = serde_json::json!({"user":{"name":name, "password": password},"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "magnets":{}, "downloading_hash": [], "hash_ani": {}, "hash_ani_slow": {}, "temp": {}, "files_to_download": {}});
             let default_json = serde_json::to_string_pretty(&default_config).unwrap();
             std::fs::write(path, default_json).unwrap_or_else(|error| {
                 eprintln!("Can not write to path!\nError: {error}");
@@ -196,9 +197,9 @@ pub async fn modify_config(mut rx: mpsc::UnboundedReceiver<Message>) {
                 *current = msg.value.to_value();
             }
         }
-        println!("try to write");
+        // println!("try to write");
         *CONFIG.write().await.get_mut_value() = new_config.clone();
-        println!("wrote!");
+        // println!("wrote!");
         if let Some(notify) = msg.notify {
             notify.notify_one();
             println!("notify the thread");

@@ -8,14 +8,14 @@ pub mod update_rss;
 #[cfg(test)]
 pub mod tests;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use config_manager::Message;
 use once_cell::sync::Lazy;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use tokio::{
-    sync::{Mutex, RwLock, mpsc::UnboundedSender},
+    sync::{mpsc::UnboundedSender, Mutex, RwLock, Semaphore},
     task::JoinHandle,
 };
 pub const PC_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
@@ -50,3 +50,4 @@ pub static CLIENT_WITH_RETRY: Lazy<ClientWithMiddleware> = Lazy::new(|| {
 pub static TX: Lazy<RwLock<Option<UnboundedSender<Message>>>> = Lazy::new(|| RwLock::new(None));
 pub static ERROR_STATUS: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
 pub static REFRESH_DOWNLOAD: Lazy<Mutex<Option<JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
+pub static REFRESH_NOTIFY: Lazy<Mutex<Arc<Semaphore>>> = Lazy::new(|| Mutex::new(Arc::new(Semaphore::new(0))));
