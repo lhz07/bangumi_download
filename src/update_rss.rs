@@ -7,15 +7,68 @@ use crate::{
 use futures::future::{self, join_all};
 use reqwest_middleware::ClientWithMiddleware;
 use scraper::{Element, Html, Selector};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, atomic::AtomicI32},
-    vec,
+    error::Error, sync::{atomic::AtomicI32, Arc}, vec
 };
+use quick_xml::de;
+use regex::Regex;
 use tokio::sync::{Notify, mpsc};
 use tokio_retry::{Retry, strategy::FibonacciBackoff};
 
-async fn get_response_text(
+#[derive(Debug, Deserialize)]
+pub struct RSS{
+    channel: Channel
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Channel{
+    title: String,
+    link: String,
+    item: Vec<Item>,
+}
+#[derive(Debug, Deserialize)]
+pub struct Item{
+    title: String,
+    link: String,
+    torrent: Torrent,
+}
+#[derive(Debug, Deserialize)]
+pub struct Torrent{
+    #[serde(rename = "pubDate")]
+    pub_date: String,
+}
+
+pub struct LItem{
+    title: String,
+    link: String,
+}
+
+pub trait Filter{
+    fn title(&self) -> &str;
+    fn link(&self) -> &str;
+}
+
+impl Filter for Item{
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn link(&self) -> &str {
+        &self.link
+    }
+}
+
+impl Filter for LItem{
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn link(&self) -> &str {
+        &self.link
+    }
+}
+
+pub async fn get_response_text(
     url: &str,
     client: ClientWithMiddleware,
 ) -> Result<String, anyhow::Error> {
@@ -51,7 +104,7 @@ pub async fn start_rss_receive(urls: Vec<&str>) {
     }
 }
 
-pub fn filter_episode<'a>(items: &'a Vec<Value>, filter: &Value, sub_id: &str) -> Vec<&'a str> {
+pub fn filter_episode<'a, T:Filter>(items: &'a Vec<T>, filter: &Value, sub_id: &str) -> Vec<&'a str> {
     let default_filters = filter["default"].as_array().unwrap();
     let mut best_filter: Option<&str> = None;
     let empty_filter: Vec<Value> = Vec::new();
@@ -61,9 +114,7 @@ pub fn filter_episode<'a>(items: &'a Vec<Value>, filter: &Value, sub_id: &str) -
     };
     'outer: for candidate_filter in candidate_filters {
         for item in items {
-            if item["title"]
-                .as_str()
-                .unwrap()
+            if item.title()
                 .contains(candidate_filter.as_str().unwrap())
             {
                 best_filter = Some(candidate_filter.as_str().unwrap());
@@ -73,21 +124,21 @@ pub fn filter_episode<'a>(items: &'a Vec<Value>, filter: &Value, sub_id: &str) -
     }
     match best_filter {
         Some(best_filter) => items
-            .iter()
+            .into_iter()
             .filter_map(|item| {
-                if item["title"].as_str().unwrap().contains(best_filter) {
-                    println!("{}", item["title"].as_str().unwrap());
-                    Some(item["link"].as_str().unwrap())
+                if item.title().contains(best_filter) {
+                    println!("{}", item.title());
+                    Some(item.link())
                 } else {
                     None
                 }
             })
             .collect::<Vec<_>>(),
         None => items
-            .iter()
+            .into_iter()
             .map(|item| {
-                println!("{}", item["title"].as_str().unwrap());
-                item["link"].as_str().unwrap()
+                println!("{}", item.title());
+                item.link()
             })
             .collect::<Vec<_>>(),
     }
@@ -112,10 +163,10 @@ pub async fn get_all_episode_magnet_links(
     let soup = Html::parse_document(&response);
     let selector = Selector::parse("a.magnet-link-wrap").unwrap();
     let elements = soup.select(&selector);
-    let mut items = Vec::<Value>::new();
+    let mut items = Vec::<LItem>::new();
     for element in elements {
-        items.push(json!({"title": element.text().collect::<String>(), 
-                        "link": element.next_sibling_element()?.value().attr("data-clipboard-text")?}));
+        items.push(LItem{title: element.text().collect::<String>(), 
+                        link: element.next_sibling_element()?.value().attr("data-clipboard-text")?.to_string()});
     }
     let magnet_links = filter_episode(&items, filter, sub_id)
         .iter()
@@ -188,6 +239,21 @@ pub async fn get_a_magnet_link(url: &str) -> Option<String> {
     Some(magnet_link)
 }
 
+pub async fn check_rss_link(url: &str) -> Result<(), String> {
+    let pattern = Regex::new(r"^https?://mikanime\.tv/RSS/Bangumi\?(bangumiId=\d+&subgroupid=\d+|subgroupid=\d+&bangumiId=\d+)$").unwrap();
+    if let None =  pattern.captures(url){
+        return Err("Invalid url!".into());
+    }
+    let response = match get_response_text(url, CLIENT_WITH_RETRY.clone()).await{
+        Ok(response) => response,
+        Err(error) => return Err(format!("can not visit rss url, error: {}", error).into()),
+    };
+    match de::from_str::<RSS>(&response){
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("can not get correct info from the link, please check bangumiId and subgroupid! Error: {}", error).into())
+    }
+}
+
 pub async fn rss_receive(
     tx: mpsc::UnboundedSender<Message>,
     url: &str,
@@ -195,17 +261,14 @@ pub async fn rss_receive(
     client: ClientWithMiddleware,
 ) -> Result<(), anyhow::Error> {
     let response = client.get(url).send().await?.text().await?;
-    let rss_content =
-        feedparser::from_str(&response).ok_or_else(|| anyhow::Error::msg("can not parse rss!"))?;
-    let items = rss_content
-        .items()
-        .ok_or_else(|| anyhow::Error::msg("can not found items!"))?;
+    let rss =
+        de::from_str::<RSS>(&response)?;
+    let channel = rss.channel;
+    let items = channel.item;
     let latest_item = items
         .first()
         .ok_or_else(|| anyhow::Error::msg("can not found latest item!"))?;
-    let mut split_ani_sub = rss_content["link"]
-        .as_str()
-        .unwrap_or_default()
+    let mut split_ani_sub = channel.link
         .split("bangumiId=")
         .nth(1)
         .unwrap_or_default()
@@ -219,27 +282,18 @@ pub async fn rss_receive(
         .ok_or_else(|| anyhow::Error::msg("can not found sub_id!"))?
         .to_string();
     let sub_name = get_subgroup_name(
-        latest_item
-            .link()
-            .ok_or_else(|| anyhow::Error::msg("can not found link!"))?,
+        &latest_item.link,
         client,
     )
     .await
     .unwrap_or_default();
-    let bangumi_name = rss_content["title"]
-        .as_str()
-        .unwrap_or_default()
+    let bangumi_name = channel.title
         .split(" - ")
         .nth(1)
-        .unwrap_or(rss_content["title"].as_str().unwrap_or_default())
+        .unwrap_or(&channel.title)
         .to_string();
     let title = format!("[{sub_name}] {bangumi_name}");
-    let latest_update = latest_item
-        .torrent()
-        .ok_or_else(|| anyhow::Error::msg("can not found pubDate!"))?["pubDate"]
-        .as_str()
-        .ok_or_else(|| anyhow::Error::msg("can not found pubDate!"))?
-        .to_string();
+    let latest_update = latest_item.torrent.pub_date.clone();
     let bangumi_id = format!("{ani_id}&{sub_id}");
     // check if the bangumi updates and is it first time to be added
     let old_bangumi_dict = old_config["bangumi"].as_object().unwrap();
@@ -266,22 +320,18 @@ pub async fn rss_receive(
         );
         tx.send(msg)?;
     } else if latest_update == old_bangumi_dict[&bangumi_id] {
-        println!("{title} 无更新");
+        println!("{title} 无更新, 上次更新: {latest_update}");
     } else {
-        let mut item_iter = rss_content["item"]
-            .as_array()
-            .ok_or_else(|| anyhow::Error::msg("can not find item in rss!"))?
-            .iter()
+        let mut item_iter = items
+            .into_iter()
             .rev();
         for item in &mut item_iter {
-            let pub_date = item["torrent"]["pubDate"]
-                .as_str()
-                .ok_or_else(|| anyhow::Error::msg("can not found pub_date!"))?;
-            if pub_date == old_bangumi_dict[&bangumi_id] {
+            let pub_date = &item.torrent.pub_date;
+            if pub_date == old_bangumi_dict[&bangumi_id].as_str().unwrap() {
                 break;
             }
         }
-        let new_items = item_iter.cloned().collect::<Vec<_>>();
+        let new_items = item_iter.collect::<Vec<_>>();
         println!("获取到以下剧集：");
         let filter = &old_config["filter"];
         let item_links = filter_episode(&new_items, filter, &sub_id);
@@ -311,19 +361,13 @@ pub async fn rss_receive(
         );
     }
     if !magnet_links.is_empty() {
+        println!("There are some magnet links of {}, let's download them!", title);
         match cloud_download(&magnet_links).await {
             Ok(hash_list) => {
                 let mut hash_ani = serde_json::Map::new();
                 for i in &hash_list {
                     hash_ani.insert(i.clone(), Value::String(title.clone()));
                 }
-                let msg = Message::new(
-                    vec!["hash_ani".to_string()],
-                    MessageType::Map(hash_ani),
-                    MessageCmd::Append,
-                    None,
-                );
-                tx.send(msg).unwrap();
                 let msg = Message::new(
                     vec!["magnets".to_string(), title.to_string()],
                     MessageType::None,
@@ -333,8 +377,8 @@ pub async fn rss_receive(
                 tx.send(msg).unwrap();
                 let notify = Arc::new(Notify::new());
                 let msg = Message::new(
-                    vec!["downloading_hash".to_string()],
-                    MessageType::List(hash_list),
+                    vec!["hash_ani".to_string()],
+                    MessageType::Map(hash_ani),
                     MessageCmd::Append,
                     Some(notify.clone()),
                 );

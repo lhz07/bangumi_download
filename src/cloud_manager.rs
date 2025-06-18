@@ -1,15 +1,56 @@
 use crate::{
-    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, config_manager::CONFIG,
-    login_with_qrcode::login_with_qrcode,
+    CLIENT_DOWNLOAD, CLIENT_PROXY, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE,
+    config_manager::CONFIG, login_with_qrcode::login_with_qrcode,
 };
+use anyhow::anyhow;
 use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap};
+use regex::Regex;
+use reqwest::header::{
+    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, USER_AGENT,
+};
+use serde::Deserialize;
 use serde_json::Value;
 use std::{cell::Cell, collections::HashMap, path::Path};
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_retry::{Retry, strategy::FixedInterval};
 
 pub const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800323d) NetType/WIFI Language/zh_CN";
+
+#[derive(Debug, Deserialize)]
+pub struct TasksResponse {
+    pub page: i32,
+    pub page_count: i32,
+    pub tasks: Vec<Task>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Task {
+    #[serde(rename = "info_hash")]
+    pub hash: String,
+    #[serde(rename = "percentDone")]
+    pub percent_done: i32,
+    pub name: String,
+    pub status: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloudDownloadResponse {
+    pub result: Vec<CloudDownloadResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloudDownloadResult {
+    pub errcode: i32,
+    #[serde(rename = "info_hash")]
+    pub hash: Option<String>,
+    pub url: String,
+}
+
+pub fn extract_magnet_hash(link: &str) -> Option<String> {
+    let re = Regex::new(r"magnet:\?xt=urn:btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})").unwrap();
+    re.captures(link)
+        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+}
 
 pub async fn get_cloud_cookies() -> String {
     let try_times = Cell::new(0);
@@ -56,7 +97,7 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), anyhow::Error> 
 }
 
 pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, anyhow::Error> {
-    let client = CLIENT_WITH_RETRY.clone();
+    let client = CLIENT_WITH_RETRY_MOBILE.clone();
     let config_lock = CONFIG.read().await;
     let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
     let mut headers = HeaderMap::new();
@@ -84,18 +125,16 @@ pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, anyhow::Erro
         .await?
         .text()
         .await?;
-    let response_json: Value = serde_json::from_str(&response)?;
-    if response_json["errcode"] == 0 || response_json["errcode"] == 10008 {
-        let result = response_json["result"]
-            .as_array()
-            .ok_or_else(|| anyhow::Error::msg("can not get result"))?
-            .iter()
-            .map(|i| i["info_hash"].as_str().unwrap().to_string())
-            .collect();
-        Ok(result)
-    } else {
-        Err(anyhow::anyhow!(response))
-    }
+    let response: CloudDownloadResponse = serde_json::from_str(&response)?;
+    let download_result = response.result;
+    let result = download_result
+        .into_iter()
+        .map(|i| match i.hash {
+            Some(hash) => hash,
+            None => extract_magnet_hash(&i.url).unwrap(),
+        })
+        .collect();
+    Ok(result)
 }
 
 pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
@@ -126,7 +165,6 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
         .split("_")
         .next()
         .unwrap();
-    println!("{}", uid);
     let data = serde_json::json!({
         "hash[0]": hash,
         "uid": uid,
@@ -142,23 +180,23 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
         .await?;
     let response_json: Value = serde_json::from_str(&response)?;
     if response_json["state"] == true {
-        println!("{:?}", response_json);
         Ok(())
     } else {
         Err(anyhow::anyhow!(response))
     }
 }
 
-pub async fn get_tasks_list() -> Result<Vec<Value>, anyhow::Error> {
-    let client = CLIENT_WITH_RETRY.clone();
+pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow::Error> {
+    // let client = CLIENT_WITH_RETRY.clone();
+    let client = CLIENT_WITH_RETRY_MOBILE.clone();
+    // let client = CLIENT_PROXY.clone();
     let config_lock = CONFIG.read().await;
     let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
-    let downloading_dict = &config_lock.get_value()["downloading_hash"];
-    let hash_list = downloading_dict.as_array().unwrap();
     let mut headers = HeaderMap::new();
     headers.insert(HOST, "115.com".parse().unwrap());
     headers.insert(CONNECTION, "keep-alive".parse().unwrap());
     headers.insert(COOKIE, cookies.parse().unwrap());
+    headers.insert(USER_AGENT, MOBILE_UA.parse().unwrap());
     let mut params = serde_json::json!({
         "ct": "lixian",
         "ac": "task_lists",
@@ -172,23 +210,26 @@ pub async fn get_tasks_list() -> Result<Vec<Value>, anyhow::Error> {
         .await?
         .text()
         .await?;
-    let mut response_json: Value = serde_json::from_str(&response)?;
-    // println!("{}", response_json);
-    let pages = response_json["page_count"]
-        .as_i64()
-        .ok_or_else(|| anyhow::Error::msg("Can not find page_count"))?;
-    let tasks = response_json["tasks"]
-        .as_array_mut()
-        .ok_or_else(|| anyhow::Error::msg("Can not get tasks list"))?;
-    let mut current_tasks = tasks
-        .iter_mut()
-        .filter(|task| hash_list.iter().any(|hash| *hash == task["info_hash"]))
-        .map(|task| task.take())
+    let tasks_response: TasksResponse = match serde_json::from_str(&response) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(anyhow!(
+                "Can not get valid tasks list! Error response: {response}"
+            ));
+        }
+    };
+    let mut pages = tasks_response.page_count;
+    let mut current_tasks = tasks_response
+        .tasks
+        .into_iter()
+        .filter(|task| hash_list.iter().any(|hash| **hash == task.hash))
         .collect::<Vec<_>>();
-    let mut page: i64 = 1;
-    while current_tasks.len() < hash_list.len() && page <= pages {
+    let mut page = 1;
+    println!("checked page 1, now start checking all tasks");
+    while current_tasks.len() < hash_list.len() && page < pages {
         page += 1;
-        params.as_object_mut().unwrap()["page"] = page.into();
+        println!("page: {}", page);
+        params["page"] = page.into();
         let response = client
             .post("https://115.com/web/lixian/")
             .headers(headers.clone())
@@ -197,15 +238,19 @@ pub async fn get_tasks_list() -> Result<Vec<Value>, anyhow::Error> {
             .await?
             .text()
             .await?;
-        let mut response_json: Value = serde_json::from_str(&response)?;
-        let mut tasks_value = response_json["tasks"].take();
-        let tasks = tasks_value
-            .as_array_mut()
-            .ok_or_else(|| anyhow::Error::msg("Can not get tasks list"))?;
-        let mut left_tasks = tasks
-            .iter_mut()
-            .filter(|task| hash_list.iter().any(|hash| *hash == task["info_hash"]))
-            .map(|task| task.take())
+        let tasks_response: TasksResponse = match serde_json::from_str(&response) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(anyhow!(
+                    "Can not get valid tasks list! Error response: {response}"
+                ));
+            }
+        };
+        pages = tasks_response.page_count;
+        let mut left_tasks = tasks_response
+            .tasks
+            .into_iter()
+            .filter(|task| hash_list.iter().any(|hash| **hash == task.hash))
             .collect::<Vec<_>>();
         current_tasks.append(&mut left_tasks);
     }
