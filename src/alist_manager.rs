@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, RwLock};
 
 use crate::{
-    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, MessageCmd, MessageType, CONFIG}, CLIENT, CLIENT_WITH_RETRY, TX
+    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, MessageCmd, MessageType, CONFIG}, CLIENT, TX
 };
 static TOKEN: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
