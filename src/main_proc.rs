@@ -1,25 +1,42 @@
-use std::{collections::HashMap, sync::Arc, time::Duration, vec};
+use std::{
+    collections::{HashMap, hash_map::OccupiedEntry},
+    sync::Arc,
+    time::{Duration, Instant},
+    vec,
+};
+
+use tokio::{sync::{Notify, Semaphore}, task::JoinHandle, time};
 
 use crate::{
-    REFRESH_DOWNLOAD, REFRESH_NOTIFY, TX,
+    REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
     alist_manager::{
-        check_is_alist_working, download_a_task, get_alist_name_passwd, get_alist_token,
+        check_is_alist_working, download_a_task, get_alist_name_passwd, get_alist_token, check_cookies
     },
     cloud_manager::{del_cloud_task, get_tasks_list},
-    config_manager::{CONFIG, Message, MessageCmd, MessageType},
+    config_manager::{CONFIG, Message, MessageCmd, MessageType, ConfigManager, modify_config},
     update_rss::start_rss_receive,
 };
 
-struct StatusIter<'a, T> {
+pub trait ConsumeSema{
+    fn consume(&self) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl ConsumeSema for Semaphore{
+    async fn consume(&self) -> () {
+        self.acquire().await.unwrap().forget();
+    }
+}
+
+pub struct StatusIter<'a, T> {
     index: usize,
     data: &'a [T],
 }
 
 impl<'a, T: Clone> StatusIter<'a, T> {
-    fn new(data: &'a [T]) -> Self {
+    pub fn new(data: &'a [T]) -> Self {
         Self { index: 0, data }
     }
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.index = 0;
     }
 }
@@ -32,11 +49,48 @@ impl<'a, T: Clone> Iterator for StatusIter<'a, T> {
             self.index += 1;
             Some(next_item)
         } else if self.index == self.data.len() {
-            Some(&self.data[self.index])
+            Some(&self.data[self.index - 1])
         } else {
             None
         }
     }
+}
+
+pub async fn initial() -> JoinHandle<()>{
+    match check_is_alist_working().await{
+        Ok(_) => println!("alist is working"),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
+    // -------------------------------------------------------------------------
+    // initial config
+    if let Err(error) = ConfigManager::initial_config().await {
+        eprintln!("can not initial config, error: {error}");
+        std::process::exit(1);
+    }
+    // launch config write thread
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    *(TX.write().await) = Some(tx);
+    let config_manager = tokio::spawn(modify_config(rx));
+    // -------------------------------------------------------------------------
+    let username = CONFIG.read().await.get_value()["user"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let password = CONFIG.read().await.get_value()["user"]["password"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    println!("{:?}", get_alist_token(&username, &password).await);
+    println!("{:?}", check_cookies().await);
+    let _rss_refresh_handle = tokio::spawn(refresh_rss());
+    let download_handle = tokio::spawn(refresh_download());
+    let download_slow_handle = tokio::spawn(refresh_download_slow());
+    REFRESH_DOWNLOAD.lock().await.replace(download_handle);
+    REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_slow_handle);
+    config_manager
 }
 
 pub async fn refresh_rss() {
@@ -112,7 +166,7 @@ pub async fn refresh_rss() {
 
 pub async fn refresh_download() {
     const WAIT_TIME_LIST: [Duration; 6] = [
-        Duration::from_secs(60),
+        Duration::from_secs(10),
         Duration::from_secs(60),
         Duration::from_secs(120),
         Duration::from_secs(120),
@@ -121,39 +175,32 @@ pub async fn refresh_download() {
     ];
     let mut wait_time = StatusIter::new(&WAIT_TIME_LIST);
     let mut error_task = HashMap::new();
-    
+    let mut task_download_time: HashMap<String, Instant> = HashMap::new();
     let reset_wait_time = REFRESH_NOTIFY.lock().await.clone();
     'outer: loop {
-        if CONFIG.read().await.get_value()["downloading_hash"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-        {
-            break;
-        }
-        let hash_ani = CONFIG.read().await.get_value()["hash_ani"].clone();
-        let tasks_list = match get_tasks_list().await {
+        println!("running refresh download");
+        let hash_ani = match CONFIG.read().await.get_value()["hash_ani"].as_object() {
+            Some(hash_ani) if !hash_ani.is_empty() => hash_ani.clone(),
+            _ => break,
+        };
+        let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
             Ok(list) => list,
             Err(error) => {
                 eprintln!("Error occurred when attempting to obtain the task list: {error}");
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                continue;
+                println!("Download refresh is stopped!");
+                break;
             }
         };
         for task in tasks_list {
             // download task failed, delete it
-            if task["status"] == -1{
-                del_cloud_task(task["info_hash"].as_str().unwrap())
-                    .await
-                    .unwrap();
+            let task_hash = &task.hash;
+            if task.status == -1 {
+                del_a_task(task_hash, "hash_ani").await;
             }
-            if task["percentDone"] == 100 {
+            if task.percent_done == 100 {
                 // download file
-                let file_name = task["name"].as_str().unwrap().to_string();
-                let ani_name = hash_ani[task["info_hash"].as_str().unwrap()]
-                    .as_str()
-                    .unwrap()
-                    .to_string();
+                let file_name = &task.name;
+                let ani_name = hash_ani[task_hash].as_str().unwrap().to_string();
                 let path = format!("/115/云下载/{file_name}/{file_name}");
                 // check is alist working
                 if let Err(error) = check_is_alist_working().await {
@@ -161,51 +208,56 @@ pub async fn refresh_download() {
                     println!("Download refresh is stopped!");
                     break;
                 }
+                println!("Downloading task {}", task.name);
                 if let Err(error) = download_a_task(&path, &ani_name).await {
                     eprintln!("Can not download a task, error: {}", error);
                     error_task
-                        .entry(task["info_hash"].as_str().unwrap().to_string())
+                        .entry(task_hash.to_string())
                         .and_modify(|times| *times += 1)
                         .or_insert(1);
-                    if error_task[task["info_hash"].as_str().unwrap()] > 3 {
+                    if error_task[task_hash] > 2 {
                         break 'outer;
                     }
                     tokio::time::sleep(Duration::from_secs(60)).await;
                     continue;
                 }
                 // after download
-                println!("Task {} is finished! Deleting task!", task["name"]);
-                del_cloud_task(task["info_hash"].as_str().unwrap())
-                    .await
-                    .unwrap();
-                {
-                    let tx = TX.read().await.clone().unwrap();
-                    let msg = Message::new(
-                        vec!["downloading_hash".to_string()],
-                        MessageType::Text(task["info_hash"].as_str().unwrap().to_string()),
-                        MessageCmd::DeleteValue,
-                        None,
-                    );
-                    tx.send(msg).unwrap();
-                    let msg = Message::new(
-                        vec![
-                            "hash_ani".to_string(),
-                            task["info_hash"].as_str().unwrap().to_string(),
-                        ],
-                        MessageType::None,
-                        MessageCmd::DeleteKey,
-                        None,
-                    );
-                    tx.send(msg).unwrap();
+                del_a_task(task_hash, "hash_ani").await;
+                println!("Task {} is finished and deleted!", task.name);
+            } else {
+                println!("Task {} is downloading: {}%", task.name, task.percent_done);
+                match task_download_time.get(task_hash) {
+                    Some(instant) => {
+                        if instant.elapsed().as_secs() > 1800 {
+                            // move to slow queue
+                            let tx = TX.read().await.clone().unwrap();
+                            let msg = Message::new(
+                                vec!["hash_ani_slow".to_string(), task_hash.to_string()],
+                                MessageType::Text(hash_ani[task_hash].to_string()),
+                                MessageCmd::Replace,
+                                None,
+                            );
+                            tx.send(msg).unwrap();
+                            let notify = Arc::new(Notify::new());
+                            let msg = Message::new(
+                                vec!["hash_ani".to_string(), task_hash.to_string()],
+                                MessageType::None,
+                                MessageCmd::DeleteKey,
+                                Some(notify.clone()),
+                            );
+                            tx.send(msg).unwrap();
+                            notify.notified().await;
+                            task_download_time.remove(task_hash);
+                            restart_refresh_download_slow().await;
+                        }
+                    }
+                    None => {
+                        task_download_time.insert(task_hash.to_string(), Instant::now());
+                    }
                 }
             }
         }
-        match tokio::time::timeout(
-            *wait_time.next().unwrap(),
-            reset_wait_time.acquire(),
-        )
-        .await
-        {
+        match tokio::time::timeout(*wait_time.next().unwrap(), reset_wait_time.consume()).await {
             Ok(_) => wait_time.reset(),
             Err(_) => continue,
         }
@@ -218,4 +270,82 @@ pub async fn restart_refresh_download() {
         let download_handle = tokio::spawn(refresh_download());
         REFRESH_DOWNLOAD.lock().await.replace(download_handle);
     }
+}
+
+pub async fn restart_refresh_download_slow() {
+    if let Some(_) = REFRESH_DOWNLOAD_SLOW
+        .lock()
+        .await
+        .take_if(|h| h.is_finished())
+    {
+        let download_handle = tokio::spawn(refresh_download_slow());
+        REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
+    }
+}
+
+pub async fn refresh_download_slow() {
+    let wait_time = Duration::from_secs(3600);
+    let mut error_task = HashMap::new();
+    'outer: loop {
+        let hash_ani = match CONFIG.read().await.get_value()["hash_ani_slow"].as_object() {
+            Some(hash_ani) if !hash_ani.is_empty()=> hash_ani.clone(),
+            _ => break,
+        };
+        let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
+            Ok(list) => list,
+            Err(error) => {
+                eprintln!("Error occurred when attempting to obtain the task list: {error}");
+                println!("Download refresh is stopped!");
+                break;
+            }
+        };
+        for task in tasks_list {
+            // download task failed, delete it
+            let task_hash = &task.hash;
+            if task.status == -1 {
+                del_a_task(task_hash, "hash_ani_slow").await;
+            }
+            if task.percent_done == 100 {
+                // download file
+                let file_name = &task.name;
+                let ani_name = hash_ani[task_hash].as_str().unwrap().to_string();
+                let path = format!("/115/云下载/{file_name}/{file_name}");
+                // check is alist working
+                if let Err(error) = check_is_alist_working().await {
+                    eprintln!("{error}");
+                    println!("Download refresh is stopped!");
+                    break;
+                }
+                println!("Downloading task {}", task.name);
+                if let Err(error) = download_a_task(&path, &ani_name).await {
+                    eprintln!("Can not download a task, error: {}", error);
+                    error_task
+                        .entry(task_hash.to_string())
+                        .and_modify(|times| *times += 1)
+                        .or_insert(1);
+                    if error_task[task_hash] > 3 {
+                        break 'outer;
+                    }
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
+                }
+                // after download
+                del_a_task(task_hash, "hash_ani_slow").await;
+                println!("Task {} is finished and deleted!", task.name);
+            }
+        }
+        tokio::time::sleep(wait_time).await;
+    }
+}
+
+async fn del_a_task(task_hash: &str, dict_name: &str) {
+    del_cloud_task(task_hash).await.unwrap();
+    let tx = TX.read().await.clone().unwrap();
+    let msg = Message::new(
+        vec![dict_name.to_string(), task_hash.to_string()],
+        MessageType::None,
+        MessageCmd::DeleteKey,
+        None,
+    );
+    tx.send(msg).unwrap();
 }
