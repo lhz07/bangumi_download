@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, RwLock};
 
 use crate::{
-    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, MessageCmd, MessageType, CONFIG}, CLIENT, TX
+    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, Config, CONFIG}, CLIENT, TX
 };
 static TOKEN: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
@@ -122,10 +122,11 @@ pub async fn check_cookies() -> Result<(), anyhow::Error> {
         let cookies = get_cloud_cookies().await;
         let tx = TX.read().await.clone().unwrap();
         let notify = Arc::new(Notify::new());
+        let cmd = Box::new(|config: &mut Config|{
+            config.cookies = cookies;
+        });
         let msg = Message::new(
-            vec!["cookies".to_string()],
-            MessageType::Text(cookies),
-            MessageCmd::Replace,
+            cmd,
             Some(notify.clone()),
         );
         tx.send(msg).unwrap();
@@ -138,8 +139,7 @@ pub async fn check_cookies() -> Result<(), anyhow::Error> {
 
 pub async fn update_alist_cookies() -> Result<String, reqwest::Error> {
     let client = CLIENT.clone();
-    let config_lock = CONFIG.read().await;
-    let cookie_str = &config_lock.get().cookies;
+    let cookie_str = &CONFIG.load().cookies;
     let addition_json = serde_json::json!({"cookie": cookie_str});
     let addition = addition_json.to_string();
     let mut headers = HeaderMap::new();

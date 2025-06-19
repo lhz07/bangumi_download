@@ -1,52 +1,56 @@
 use crate::{
-    cloud_manager::cloud_download, config_manager::{Config, Message, MessageCmd, MessageType, CONFIG}, main_proc::restart_refresh_download, CLIENT_WITH_RETRY, ERROR_STATUS, TX
+    CLIENT_WITH_RETRY, ERROR_STATUS, TX,
+    cloud_manager::cloud_download,
+    config_manager::{CONFIG, Config, Message},
+    main_proc::restart_refresh_download,
 };
 use futures::future::{self, join_all};
+use quick_xml::de;
+use regex::Regex;
 use reqwest_middleware::ClientWithMiddleware;
 use scraper::{Element, Html, Selector};
 use serde::Deserialize;
 use std::{
-    collections::HashMap, sync::{atomic::AtomicI32, Arc}, vec
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicI32},
 };
-use quick_xml::de;
-use regex::Regex;
 use tokio::sync::{Notify, mpsc};
 use tokio_retry::{Retry, strategy::FibonacciBackoff};
 
 #[derive(Debug, Deserialize)]
-pub struct RSS{
-    channel: Channel
+pub struct RSS {
+    channel: Channel,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Channel{
+pub struct Channel {
     title: String,
     link: String,
     item: Vec<Item>,
 }
 #[derive(Debug, Deserialize)]
-pub struct Item{
+pub struct Item {
     title: String,
     link: String,
     torrent: Torrent,
 }
 #[derive(Debug, Deserialize)]
-pub struct Torrent{
+pub struct Torrent {
     #[serde(rename = "pubDate")]
     pub_date: String,
 }
 
-pub struct LItem{
+pub struct LItem {
     title: String,
     link: String,
 }
 
-pub trait Filter{
+pub trait Filter {
     fn title(&self) -> &str;
     fn link(&self) -> &str;
 }
 
-impl Filter for Item{
+impl Filter for Item {
     fn title(&self) -> &str {
         &self.title
     }
@@ -55,7 +59,7 @@ impl Filter for Item{
     }
 }
 
-impl Filter for LItem{
+impl Filter for LItem {
     fn title(&self) -> &str {
         &self.title
     }
@@ -79,12 +83,12 @@ pub async fn get_response_text(
     }
 }
 
-pub async fn start_rss_receive(urls: Vec<String>) {
+pub async fn start_rss_receive(urls: Vec<&String>) {
     // read the config
-    let old_config = CONFIG.read().await.get().clone();
+    let old_config = CONFIG.load_full();
     // create the sender futures
     let mut futs = Vec::new();
-    for url in &urls {
+    for url in urls {
         let tx = match TX.read().await.clone() {
             Some(tx) => tx,
             None => return,
@@ -100,7 +104,11 @@ pub async fn start_rss_receive(urls: Vec<String>) {
     }
 }
 
-pub fn filter_episode<'a, T:Filter>(items: &'a Vec<T>, filter: &HashMap<String, Vec<String>>, sub_id: &str) -> Vec<&'a str> {
+pub fn filter_episode<'a, T: Filter>(
+    items: &'a Vec<T>,
+    filter: &HashMap<String, Vec<String>>,
+    sub_id: &str,
+) -> Vec<&'a str> {
     let default_filters = &filter["default"];
     let mut best_filter: Option<&str> = None;
     let empty_filter: Vec<String> = Vec::new();
@@ -110,9 +118,7 @@ pub fn filter_episode<'a, T:Filter>(items: &'a Vec<T>, filter: &HashMap<String, 
     };
     'outer: for candidate_filter in candidate_filters {
         for item in items {
-            if item.title()
-                .contains(candidate_filter)
-            {
+            if item.title().contains(candidate_filter) {
                 best_filter = Some(candidate_filter);
                 break 'outer;
             }
@@ -161,8 +167,14 @@ pub async fn get_all_episode_magnet_links(
     let elements = soup.select(&selector);
     let mut items = Vec::<LItem>::new();
     for element in elements {
-        items.push(LItem{title: element.text().collect::<String>(), 
-                        link: element.next_sibling_element()?.value().attr("data-clipboard-text")?.to_string()});
+        items.push(LItem {
+            title: element.text().collect::<String>(),
+            link: element
+                .next_sibling_element()?
+                .value()
+                .attr("data-clipboard-text")?
+                .to_string(),
+        });
     }
     let magnet_links = filter_episode(&items, filter, sub_id)
         .iter()
@@ -237,10 +249,10 @@ pub async fn get_a_magnet_link(url: &str) -> Option<String> {
 
 pub async fn check_rss_link(url: &str) -> Result<(), String> {
     let pattern = Regex::new(r"^https?://mikanime\.tv/RSS/Bangumi\?(bangumiId=\d+&subgroupid=\d+|subgroupid=\d+&bangumiId=\d+)$").unwrap();
-    if let None =  pattern.captures(url){
+    if let None = pattern.captures(url) {
         return Err("Invalid url!".into());
     }
-    let response = match get_response_text(url, CLIENT_WITH_RETRY.clone()).await{
+    let response = match get_response_text(url, CLIENT_WITH_RETRY.clone()).await {
         Ok(response) => response,
         Err(error) => return Err(format!("can not visit rss url, error: {}", error).into()),
     };
@@ -257,14 +269,14 @@ pub async fn rss_receive(
     client: ClientWithMiddleware,
 ) -> Result<(), anyhow::Error> {
     let response = client.get(url).send().await?.text().await?;
-    let rss =
-        de::from_str::<RSS>(&response)?;
+    let rss = de::from_str::<RSS>(&response)?;
     let channel = rss.channel;
     let items = channel.item;
     let latest_item = items
         .first()
         .ok_or_else(|| anyhow::Error::msg("can not found latest item!"))?;
-    let mut split_ani_sub = channel.link
+    let mut split_ani_sub = channel
+        .link
         .split("bangumiId=")
         .nth(1)
         .unwrap_or_default()
@@ -277,13 +289,11 @@ pub async fn rss_receive(
         .next()
         .ok_or_else(|| anyhow::Error::msg("can not found sub_id!"))?
         .to_string();
-    let sub_name = get_subgroup_name(
-        &latest_item.link,
-        client,
-    )
-    .await
-    .unwrap_or_default();
-    let bangumi_name = channel.title
+    let sub_name = get_subgroup_name(&latest_item.link, client)
+        .await
+        .unwrap_or_default();
+    let bangumi_name = channel
+        .title
         .split(" - ")
         .nth(1)
         .unwrap_or(&channel.title)
@@ -296,31 +306,30 @@ pub async fn rss_receive(
     let mut magnet_links: Vec<String> = Vec::new();
     if !old_bangumi_dict.contains_key(&bangumi_id) {
         // write to config
-        let msg = Message::new(
-            vec!["bangumi".to_string(), format!("{ani_id}&{sub_id}")],
-            MessageType::Text(latest_update),
-            MessageCmd::Replace,
-            None,
-        );
+        let insert_key = format!("{ani_id}&{sub_id}");
+        let cmd = Box::new(|config: &mut Config| {
+            config
+                .bangumi
+                .insert(insert_key, latest_update);
+        });
+        let msg = Message::new(cmd, None);
         tx.send(msg)?;
         if let Some(links) =
             get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await
         {
             magnet_links = links
         }
-        let msg = Message::new(
-            vec!["rss_links".to_string(), title.to_string()],
-            MessageType::Text(url.to_owned()),
-            MessageCmd::Replace,
-            None,
-        );
+        let insert_title = title.clone();
+        let insert_url = url.to_string();
+        let cmd = Box::new(|config: &mut Config| {
+            config.rss_links.insert(insert_title, insert_url);
+        });
+        let msg = Message::new(cmd, None);
         tx.send(msg)?;
     } else if latest_update == old_bangumi_dict[&bangumi_id] {
         println!("{title} 无更新, 上次更新: {latest_update}");
     } else {
-        let mut item_iter = items
-            .into_iter()
-            .rev();
+        let mut item_iter = items.into_iter().rev();
         for item in &mut item_iter {
             let pub_date = &item.torrent.pub_date;
             if *pub_date == old_bangumi_dict[&bangumi_id] {
@@ -340,54 +349,50 @@ pub async fn rss_receive(
                 return Err(anyhow::anyhow!("Can not get magnet links!"));
             }
         };
-        let msg = Message::new(
-            vec!["bangumi".to_string(), format!("{ani_id}&{sub_id}")],
-            MessageType::Text(latest_update),
-            MessageCmd::Replace,
-            None,
-        );
+        let insert_key = format!("{ani_id}&{sub_id}");
+        let cmd = Box::new(|config: &mut Config| {
+            config
+                .bangumi
+                .insert(insert_key, latest_update);
+        });
+        let msg = Message::new(cmd, None);
         tx.send(msg)?;
     }
     if let Some(magnets) = old_config.magnets.get(&title) {
-        magnet_links.append(
-            &mut magnets
-                .iter()
-                .map(|i| i.clone())
-                .collect::<Vec<_>>(),
-        );
+        magnet_links.append(&mut magnets.iter().map(|i| i.clone()).collect::<Vec<_>>());
     }
     if !magnet_links.is_empty() {
-        println!("There are some magnet links of {}, let's download them!", title);
+        println!(
+            "There are some magnet links of {}, let's download them!",
+            title
+        );
         match cloud_download(&magnet_links).await {
             Ok(hash_list) => {
                 let mut hash_ani = HashMap::new();
                 for i in &hash_list {
                     hash_ani.insert(i.clone(), title.clone());
                 }
-                let msg = Message::new(
-                    vec!["magnets".to_string(), title.to_string()],
-                    MessageType::None,
-                    MessageCmd::Delete,
-                    None,
-                );
+                let cmd = Box::new(move|config: &mut Config| {
+                    config.magnets.remove(&title);
+                });
+                let msg = Message::new(cmd, None);
                 tx.send(msg).unwrap();
                 let notify = Arc::new(Notify::new());
-                let msg = Message::new(
-                    vec!["hash_ani".to_string()],
-                    MessageType::Map(hash_ani),
-                    MessageCmd::Append,
-                    Some(notify.clone()),
-                );
+                let cmd = Box::new(|config: &mut Config| {
+                    config.hash_ani.extend(hash_ani.into_iter());
+                });
+                let msg = Message::new(cmd, Some(notify.clone()));
                 tx.send(msg).expect("can not send to config thread!");
                 notify.notified().await;
                 restart_refresh_download().await;
             }
             Err(error) => {
                 eprintln!("Error: {:?}", error);
+                let cmd = Box::new(move |config: &mut Config|{
+                    config.magnets.get_mut(&title).unwrap().append(&mut magnet_links);
+                });
                 let msg = Message::new(
-                    vec!["magnets".to_string(), title.to_string()],
-                    MessageType::List(magnet_links),
-                    MessageCmd::Append,
+                    cmd,
                     None,
                 );
                 tx.send(msg).expect("can not send to config thread!");

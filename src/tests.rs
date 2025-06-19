@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fs::read_to_string};
 
+use super::*;
 use crate::config_manager::Config;
 use config_manager::*;
-use super::*;
 use quick_xml::de;
 use serde_json::Value;
 
@@ -143,11 +143,7 @@ fn test_serialize_config() {
 fn general_config_modify_test(origin: Value, msg: Message) -> Config {
     let mut config = serde_json::from_value::<Config>(origin).unwrap();
     println!("{:#?}", config);
-    match msg.cmd {
-        MessageCmd::Replace => msg.value.replace(msg.keys, &mut config),
-        MessageCmd::Append => msg.value.add(msg.keys, &mut config),
-        MessageCmd::Delete => msg.value.remove(msg.keys, &mut config),
-    }
+    (msg.cmd)(&mut config);
     println!("{:#?}", config);
     config
 }
@@ -165,7 +161,7 @@ async fn config_test() {
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
     // initial config
     let origin_config = serde_json::from_value::<Config>(origin).unwrap();
-    *CONFIG.write().await.get_mut() = origin_config;
+    CONFIG.store(Arc::new(origin_config));
     // launch config write thread
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
     let config_manager = tokio::spawn(config_manager::modify_config(rx));
@@ -175,10 +171,11 @@ async fn config_test() {
         vec!["简日".to_string(), "简体".to_string()],
     );
     map1.insert("587".to_string(), vec!["CHS".to_string()]);
+    let cmd = Box::new(|config: &mut Config| {
+        config.filter.extend(map1.into_iter());
+    });
     let msg = Message::new(
-        vec!["filter".to_string()],
-        config_manager::MessageType::MapVec(map1),
-        config_manager::MessageCmd::Append,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(
@@ -194,11 +191,10 @@ async fn config_test() {
     tokio::time::sleep(Duration::from_millis(1)).await;
     drop(tx);
     config_manager.await.unwrap();
-    let new_config = CONFIG.read().await.get().clone();
+    let new_config = CONFIG.load().as_ref().clone();
     let result = serde_json::to_value(new_config).unwrap();
     assert_eq!(result, expect_result);
 }
-
 
 #[test]
 fn replace_vec() {
@@ -210,11 +206,11 @@ fn replace_vec() {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
+    let cmd = Box::new(|config: &mut Config| {
+        *config.filter.get_mut("default").unwrap() = vec!["简日内嵌".to_string()];
+    });
     let msg = Message::new(
-        vec!["filter".to_string(), "default".to_string()],
-        MessageType::List(vec!["简日内嵌".to_string()]),
-        MessageCmd::Replace,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(
@@ -243,11 +239,9 @@ fn replace_text() {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
+    let cmd = Box::new(|config: &mut Config| config.user.name = "master".to_string());
     let msg = Message::new(
-        vec!["user".to_string(), "name".to_string()],
-        config_manager::MessageType::Text("master".to_string()),
-        config_manager::MessageCmd::Replace,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(
@@ -273,11 +267,15 @@ fn append_vec_to_vec() {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
+    let cmd = Box::new(|config: &mut Config| {
+        config
+            .filter
+            .get_mut("611")
+            .unwrap()
+            .append(&mut vec!["简日内嵌".to_string(), "CHS".to_string()]);
+    });
     let msg = Message::new(
-        vec!["filter".to_string(), "611".to_string()],
-        config_manager::MessageType::List(vec!["简日内嵌".to_string(), "CHS".to_string()]),
-        config_manager::MessageCmd::Append,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(
@@ -310,10 +308,11 @@ fn append_map() {
         vec!["简日".to_string(), "简体".to_string()],
     );
     map1.insert("587".to_string(), vec!["CHS".to_string()]);
+    let cmd = Box::new(|config: &mut Config| {
+        config.filter.extend(map1.into_iter());
+    });
     let msg = Message::new(
-        vec!["filter".to_string()],
-        config_manager::MessageType::MapVec(map1),
-        config_manager::MessageCmd::Append,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(
@@ -339,11 +338,15 @@ fn append_text_to_vec() {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
+    let cmd = Box::new(|config: &mut Config| {
+        config
+            .filter
+            .get_mut("611")
+            .unwrap()
+            .push("简日内嵌".to_string());
+    });
     let msg = Message::new(
-        vec!["filter".to_string(), "611".to_string()],
-        config_manager::MessageType::Text("简日内嵌".to_string()),
-        config_manager::MessageCmd::Append,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(
@@ -369,11 +372,11 @@ fn del_key() {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], "233": ["繁体"],
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
+    let cmd = Box::new(|config: &mut Config| {
+        config.filter.remove("233");
+    });
     let msg = Message::new(
-        vec!["filter".to_string(), "233".to_string()],
-        config_manager::MessageType::None,
-        config_manager::MessageCmd::Delete,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(
@@ -399,11 +402,15 @@ fn del_value() {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"],
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
+    let cmd = Box::new(|config: &mut Config| {
+        config
+            .filter
+            .get_mut("default")
+            .unwrap()
+            .remove_an_element(&"简体".to_string());
+    });
     let msg = Message::new(
-        vec!["filter".to_string(), "default".to_string()],
-        config_manager::MessageType::Text("简体".to_string()),
-        config_manager::MessageCmd::Delete,
+        cmd,
         None,
     );
     let expect_result = serde_json::json!(

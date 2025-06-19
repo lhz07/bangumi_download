@@ -2,26 +2,29 @@ use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
-    vec,
 };
 
-use tokio::{sync::{Notify, Semaphore}, task::JoinHandle};
+use tokio::{
+    sync::{Notify, Semaphore},
+    task::JoinHandle,
+};
 
 use crate::{
     REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
     alist_manager::{
-        check_is_alist_working, download_a_task, get_alist_name_passwd, get_alist_token, check_cookies
+        check_cookies, check_is_alist_working, download_a_task, get_alist_name_passwd,
+        get_alist_token,
     },
     cloud_manager::{del_cloud_task, get_tasks_list},
-    config_manager::{CONFIG, Message, MessageCmd, MessageType, ConfigManager, modify_config},
+    config_manager::{CONFIG, Config, Message, modify_config},
     update_rss::start_rss_receive,
 };
 
-pub trait ConsumeSema{
+pub trait ConsumeSema {
     fn consume(&self) -> impl std::future::Future<Output = ()> + Send;
 }
 
-impl ConsumeSema for Semaphore{
+impl ConsumeSema for Semaphore {
     async fn consume(&self) -> () {
         self.acquire().await.unwrap().forget();
     }
@@ -56,8 +59,8 @@ impl<'a, T: Clone> Iterator for StatusIter<'a, T> {
     }
 }
 
-pub async fn initial() -> JoinHandle<()>{
-    match check_is_alist_working().await{
+pub async fn initial() -> JoinHandle<()> {
+    match check_is_alist_working().await {
         Ok(_) => println!("alist is working"),
         Err(error) => {
             eprintln!("{error}");
@@ -66,7 +69,7 @@ pub async fn initial() -> JoinHandle<()>{
     }
     // -------------------------------------------------------------------------
     // initial config
-    if let Err(error) = ConfigManager::initial_config().await {
+    if let Err(error) = Config::initial_config().await {
         eprintln!("can not initial config, error: {error}");
         std::process::exit(1);
     }
@@ -75,25 +78,28 @@ pub async fn initial() -> JoinHandle<()>{
     *(TX.write().await) = Some(tx);
     let config_manager = tokio::spawn(modify_config(rx));
     // -------------------------------------------------------------------------
-    let username = CONFIG.read().await.get().user.name.clone();
-    let password = CONFIG.read().await.get().user.password.clone();
+    let username = &CONFIG.load().user.name;
+    let password = &CONFIG.load().user.password;
     println!("{:?}", get_alist_token(&username, &password).await);
     println!("{:?}", check_cookies().await);
     let _rss_refresh_handle = tokio::spawn(refresh_rss());
     let download_handle = tokio::spawn(refresh_download());
     let download_slow_handle = tokio::spawn(refresh_download_slow());
     REFRESH_DOWNLOAD.lock().await.replace(download_handle);
-    REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_slow_handle);
+    REFRESH_DOWNLOAD_SLOW
+        .lock()
+        .await
+        .replace(download_slow_handle);
     config_manager
 }
 
 pub async fn refresh_rss() {
     'outer: loop {
         println!("\nChecking updates...\n");
-        let rss_links = CONFIG.read().await.get().rss_links.clone();
-        let username = CONFIG.read().await.get().user.name.clone();
-        let password = CONFIG.read().await.get().user.password.clone();
-        let urls = rss_links.into_values().collect::<Vec<String>>();
+        let rss_links = &CONFIG.load_full().rss_links;
+        let username = CONFIG.load().user.name.clone();
+        let password = CONFIG.load().user.password.clone();
+        let urls = rss_links.values().collect::<Vec<&String>>();
         start_rss_receive(urls).await;
         println!("\nCheck finished!\n");
         tokio::time::sleep(Duration::from_secs(2700)).await;
@@ -117,19 +123,15 @@ pub async fn refresh_rss() {
                     "y" => {
                         let (name, password) = get_alist_name_passwd().await;
                         let tx = TX.read().await.clone().unwrap();
-                        let msg = Message::new(
-                            vec!["user".to_string(), "name".to_string()],
-                            MessageType::Text(name),
-                            MessageCmd::Replace,
-                            None,
-                        );
+                        let cmd = Box::new(|config: &mut Config| {
+                            config.user.name = name;
+                        });
+                        let msg = Message::new(cmd, None);
                         tx.send(msg).unwrap();
-                        let msg = Message::new(
-                            vec!["user".to_string(), "password".to_string()],
-                            MessageType::Text(password),
-                            MessageCmd::Replace,
-                            None,
-                        );
+                        let cmd = Box::new(|config: &mut Config| {
+                            config.user.password = password;
+                        });
+                        let msg = Message::new(cmd, None);
                         tx.send(msg).unwrap();
                         break;
                     }
@@ -163,11 +165,11 @@ pub async fn refresh_download() {
     'outer: loop {
         println!("running refresh download");
         let hash_ani = {
-            let config = CONFIG.read().await;
-            if config.get().hash_ani.is_empty(){
+            let config = CONFIG.load();
+            if config.hash_ani.is_empty() {
                 break;
-            }else{
-                config.get().hash_ani.clone()
+            } else {
+                &config.clone().hash_ani
             }
         };
         let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
@@ -182,7 +184,7 @@ pub async fn refresh_download() {
             // download task failed, delete it
             let task_hash = &task.hash;
             if task.status == -1 {
-                del_a_task(task_hash, "hash_ani").await;
+                del_a_task::<HashAni>(task_hash).await;
             }
             if task.percent_done == 100 {
                 // download file
@@ -209,7 +211,7 @@ pub async fn refresh_download() {
                     continue;
                 }
                 // after download
-                del_a_task(task_hash, "hash_ani").await;
+                del_a_task::<HashAni>(task_hash).await;
                 println!("Task {} is finished and deleted!", task.name);
             } else {
                 println!("Task {} is downloading: {}%", task.name, task.percent_done);
@@ -218,20 +220,19 @@ pub async fn refresh_download() {
                         if instant.elapsed().as_secs() > 1800 {
                             // move to slow queue
                             let tx = TX.read().await.clone().unwrap();
-                            let msg = Message::new(
-                                vec!["hash_ani_slow".to_string(), task_hash.to_string()],
-                                MessageType::Text(hash_ani[task_hash].to_string()),
-                                MessageCmd::Replace,
-                                None,
-                            );
+                            let insert_key = task_hash.to_string();
+                            let insert_value = hash_ani[task_hash].to_string();
+                            let cmd = Box::new(|config: &mut Config| {
+                                config.hash_ani_slow.insert(insert_key, insert_value);
+                            });
+                            let msg = Message::new(cmd, None);
                             tx.send(msg).unwrap();
                             let notify = Arc::new(Notify::new());
-                            let msg = Message::new(
-                                vec!["hash_ani".to_string(), task_hash.to_string()],
-                                MessageType::None,
-                                MessageCmd::Delete,
-                                Some(notify.clone()),
-                            );
+                            let remove_key = task_hash.to_string();
+                            let cmd = Box::new(move |config: &mut Config| {
+                                config.hash_ani.remove(&remove_key);
+                            });
+                            let msg = Message::new(cmd, Some(notify.clone()));
                             tx.send(msg).unwrap();
                             notify.notified().await;
                             task_download_time.remove(task_hash);
@@ -275,11 +276,11 @@ pub async fn refresh_download_slow() {
     let mut error_task = HashMap::new();
     'outer: loop {
         let hash_ani = {
-            let config = CONFIG.read().await;
-            if config.get().hash_ani.is_empty(){
+            let config = CONFIG.load();
+            if config.hash_ani.is_empty() {
                 break;
-            }else{
-                config.get().hash_ani.clone()
+            } else {
+                &config.clone().hash_ani
             }
         };
         let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
@@ -294,7 +295,7 @@ pub async fn refresh_download_slow() {
             // download task failed, delete it
             let task_hash = &task.hash;
             if task.status == -1 {
-                del_a_task(task_hash, "hash_ani_slow").await;
+                del_a_task::<HashAniSlow>(task_hash).await;
             }
             if task.percent_done == 100 {
                 // download file
@@ -321,22 +322,36 @@ pub async fn refresh_download_slow() {
                     continue;
                 }
                 // after download
-                del_a_task(task_hash, "hash_ani_slow").await;
+                del_a_task::<HashAniSlow>(task_hash).await;
                 println!("Task {} is finished and deleted!", task.name);
             }
         }
         tokio::time::sleep(wait_time).await;
     }
 }
-
-async fn del_a_task(task_hash: &str, dict_name: &str) {
+struct HashAni;
+struct HashAniSlow;
+trait DeleteTask {
+    fn del_a_task(task_hash: String) -> Box<impl Fn(&mut Config) + Send + Sync>;
+}
+impl DeleteTask for HashAni {
+    fn del_a_task(task_hash: String) -> Box<impl Fn(&mut Config) + Send + Sync>{
+        Box::new(move |config: &mut Config| {
+            config.hash_ani.remove(&task_hash);
+        })
+    }
+}
+impl DeleteTask for HashAniSlow{
+    fn del_a_task(task_hash: String) -> Box<impl Fn(&mut Config) + Send + Sync> {
+        Box::new(move |config: &mut Config| {
+            config.hash_ani_slow.remove(&task_hash);
+        })
+    }
+}
+async fn del_a_task<T: DeleteTask + 'static>(task_hash: &str) {
     del_cloud_task(task_hash).await.unwrap();
     let tx = TX.read().await.clone().unwrap();
-    let msg = Message::new(
-        vec![dict_name.to_string(), task_hash.to_string()],
-        MessageType::None,
-        MessageCmd::Delete,
-        None,
-    );
+    let cmd = T::del_a_task(task_hash.to_string());
+    let msg = Message::new(cmd, None);
     tx.send(msg).unwrap();
 }
