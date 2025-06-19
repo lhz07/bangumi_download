@@ -1,5 +1,3 @@
-use tokio::net::UnixStream;
-
 use crate::socket_utils::SocketStream;
 
 // macro_rules! println {
@@ -21,9 +19,9 @@ impl WriteToOutput for SocketStream{
     }
 }
 
-struct StdOut;
+struct _StdOut;
 
-impl WriteToOutput for StdOut{
+impl WriteToOutput for _StdOut{
     async fn print(&mut self, content: String) -> () {
         println!("{}", content);
     }

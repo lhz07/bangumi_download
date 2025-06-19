@@ -1,11 +1,8 @@
 use bangumi_download::{
-    CLIENT_WITH_RETRY, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, TX,
-    alist_manager::{check_cookies, check_is_alist_working, get_alist_token},
+    TX,
     cli_tools::{Args, Cli, Command},
-    config_manager::{CONFIG, ConfigManager, Message, modify_config},
-    main_proc::{initial, refresh_download, refresh_download_slow, refresh_rss},
-    socket_utils::{SocketListener, SocketPath, SocketState, SocketStateDetect},
-    update_rss::rss_receive,
+    main_proc::initial,
+    socket_utils::{ SocketPath, SocketState, SocketStateDetect},
 };
 use clap::Parser;
 use tokio::signal;
@@ -63,50 +60,4 @@ async fn main() {
             _ = listener.listening() => {}
         }
     }
-
-    // if let SocketState::Working = socket_path.try_connect() {
-    //     manager.write("hello").await.unwrap();
-    //     loop {
-    //     println!(
-    //         "\n请输入想要执行的操作: \n1.添加RSS链接\n2.删除RSS链接\n3.添加字幕组过滤器\n4.删除字幕组过滤器\n5.添加单个磁链下载\n6.退出程序\n"
-    //     );
-    //     let mut input = String::new();
-    //     std::io::stdin().read_line(&mut input).unwrap();
-    //     let select = input.trim();
-    //     match select {
-    //         "1" => {
-    //             println!("请输入要添加的RSS链接:");
-    //             let mut input = String::new();
-    //             std::io::stdin().read_line(&mut input).unwrap();
-    //             let rss_link = input.trim();
-    //             if rss_link.is_empty() {
-    //                 println!("RSS链接不能为空");
-    //                 continue;
-    //             }
-    //             let tx = TX.read().await.clone().unwrap();
-    //             let old_config = CONFIG.read().await.get_value().clone();
-    //             rss_receive(tx, rss_link, &old_config, CLIENT_WITH_RETRY.clone())
-    //                 .await
-    //                 .unwrap();
-    //         }
-    //         "6" => {
-    //             println!("正在退出...");
-    //             break;
-    //         }
-    //         _ => continue,
-    //     }
-    // }
-    // } else {
-    //     manager.bind().unwrap();
-    //     let config_manager = initial().await;
-    //     tokio::select! {
-    //         _ = signal::ctrl_c() => {
-    //             println!("Exiting...");
-    //             drop(TX.write().await.take());
-    //             config_manager.await.unwrap();
-    //             drop(manager);
-    //         }
-    //         _ = manager.listening() => {}
-    //     }
-    // }
 }

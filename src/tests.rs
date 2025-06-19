@@ -1,235 +1,14 @@
 use std::{collections::HashMap, fs::read_to_string};
 
-use crate::config_manager::{Add, Config, StructPath};
-
+use crate::config_manager::Config;
+use config_manager::*;
 use super::*;
 use quick_xml::de;
 use serde_json::Value;
 
-// NOTICE: Global variable is shared between tests, so use `cargo test -- --test-threads=1`
+// NOTICE: Global variable is shared between tests, you may use `cargo test -- --test-threads=1`
+// when the tests are failed
 // These tests only test part of the functions
-
-async fn general_config_test(origin: Value, msg: Message) -> Value {
-    use config_manager::CONFIG;
-    // initial config
-    *CONFIG.write().await.get_mut_value() = origin;
-    // launch config write thread
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-    let config_manager = tokio::spawn(config_manager::modify_config(rx));
-    tx.send(msg).unwrap();
-
-    tokio::time::sleep(Duration::from_millis(1)).await;
-    drop(tx);
-    config_manager.await.unwrap();
-    CONFIG.read().await.get_value().clone()
-}
-
-#[tokio::test]
-async fn append_map() {
-    let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-
-    let map1 = serde_json::json!({"610": ["简日", "简体"], "587": ["CHS"]})
-        .as_object()
-        .unwrap()
-        .clone();
-    let msg = Message::new(
-        vec!["filter".to_string()],
-        config_manager::MessageType::Map(map1),
-        config_manager::MessageCmd::Append,
-        None,
-    );
-    let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "610": ["简日", "简体"], "587": ["CHS"],
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-    let result = general_config_test(origin, msg).await;
-    assert_eq!(expect_result, result);
-}
-
-#[tokio::test]
-async fn append_text_to_vec() {
-    let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-
-    let msg = Message::new(
-        vec!["filter".to_string(), "611".to_string()],
-        config_manager::MessageType::Text("简日内嵌".to_string()),
-        config_manager::MessageCmd::Append,
-        None,
-    );
-    let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封", "简日内嵌"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-    let result = general_config_test(origin, msg).await;
-    assert_eq!(expect_result, result);
-}
-
-#[tokio::test]
-async fn del_key() {
-    let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "233": ["繁体"],
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-
-    let msg = Message::new(
-        vec!["filter".to_string(), "233".to_string()],
-        config_manager::MessageType::None,
-        config_manager::MessageCmd::DeleteKey,
-        None,
-    );
-    let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-    let result = general_config_test(origin, msg).await;
-    assert_eq!(expect_result, result);
-}
-
-#[tokio::test]
-async fn del_value() {
-    let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"],
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-
-    let msg = Message::new(
-        vec!["filter".to_string(), "default".to_string()],
-        config_manager::MessageType::Text("简体".to_string()),
-        config_manager::MessageCmd::DeleteValue,
-        None,
-    );
-    let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-    let result = general_config_test(origin, msg).await;
-    assert_eq!(expect_result, result);
-}
-
-#[tokio::test]
-async fn append_vec_to_vec() {
-    let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-
-    let msg = Message::new(
-        vec!["filter".to_string(), "611".to_string()],
-        config_manager::MessageType::List(vec!["简日内嵌".to_string(), "CHS".to_string()]),
-        config_manager::MessageCmd::Append,
-        None,
-    );
-    let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封", "简日内嵌", "CHS"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-    let result = general_config_test(origin, msg).await;
-    assert_eq!(expect_result, result);
-}
-
-#[tokio::test]
-async fn replace_vec() {
-    let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
-    let msg = Message::new(
-        vec!["filter".to_string(), "default".to_string()],
-        config_manager::MessageType::List(vec!["简日内嵌".to_string()]),
-        config_manager::MessageCmd::Replace,
-        None,
-    );
-    let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简日内嵌"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let result = general_config_test(origin, msg).await;
-    assert_eq!(expect_result, result);
-}
-
-#[tokio::test]
-async fn replace_text() {
-    let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-
-    let msg = Message::new(
-        vec!["user".to_string(), "name".to_string()],
-        config_manager::MessageType::Text("master".to_string()),
-        config_manager::MessageCmd::Replace,
-        None,
-    );
-    let expect_result = serde_json::json!(
-        {"user":{"name":"master", "password": ""},
-        "bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "temp": {}, "files_to_download": {}});
-    let result = general_config_test(origin, msg).await;
-    assert_eq!(expect_result, result);
-}
 
 #[tokio::test]
 async fn test_get_a_magnet_link() {
@@ -314,9 +93,9 @@ async fn test_status_iter() {
     use crate::main_proc::StatusIter;
     use std::time::Instant;
     const WAIT_TIME_LIST: [Duration; 3] = [
-        Duration::from_secs(2),
-        Duration::from_secs(3),
-        Duration::from_secs(5),
+        Duration::from_millis(200),
+        Duration::from_millis(300),
+        Duration::from_millis(500),
     ];
     let mut count = 0;
     let mut wait_time = StatusIter::new(&WAIT_TIME_LIST);
@@ -336,7 +115,7 @@ async fn test_status_iter() {
             Err(_) => continue,
         }
     }
-    assert_eq!(timer.elapsed().as_secs(), 10);
+    assert_eq!(timer.elapsed().as_secs(), 1);
 }
 
 #[tokio::test]
@@ -361,9 +140,68 @@ fn test_serialize_config() {
     // println!("{:#?}", config);
 }
 
+fn general_config_modify_test(origin: Value, msg: Message) -> Config {
+    let mut config = serde_json::from_value::<Config>(origin).unwrap();
+    println!("{:#?}", config);
+    match msg.cmd {
+        MessageCmd::Replace => msg.value.replace(msg.keys, &mut config),
+        MessageCmd::Append => msg.value.add(msg.keys, &mut config),
+        MessageCmd::Delete => msg.value.remove(msg.keys, &mut config),
+    }
+    println!("{:#?}", config);
+    config
+}
+
+#[tokio::test]
+async fn config_test() {
+    use config_manager::CONFIG;
+    let origin = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    // initial config
+    let origin_config = serde_json::from_value::<Config>(origin).unwrap();
+    *CONFIG.write().await.get_mut() = origin_config;
+    // launch config write thread
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    let config_manager = tokio::spawn(config_manager::modify_config(rx));
+    let mut map1 = HashMap::<String, Vec<String>>::new();
+    map1.insert(
+        "610".to_string(),
+        vec!["简日".to_string(), "简体".to_string()],
+    );
+    map1.insert("587".to_string(), vec!["CHS".to_string()]);
+    let msg = Message::new(
+        vec!["filter".to_string()],
+        config_manager::MessageType::MapVec(map1),
+        config_manager::MessageCmd::Append,
+        None,
+    );
+    let expect_result = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "610": ["简日", "简体"], "587": ["CHS"],
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    tx.send(msg).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    drop(tx);
+    config_manager.await.unwrap();
+    let new_config = CONFIG.read().await.get().clone();
+    let result = serde_json::to_value(new_config).unwrap();
+    assert_eq!(result, expect_result);
+}
+
+
 #[test]
-fn test_modify_config() {
-    use config_manager::*;
+fn replace_vec() {
     let origin = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -373,7 +211,7 @@ fn test_modify_config() {
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
 
-    let mut msg = Message::new(
+    let msg = Message::new(
         vec!["filter".to_string(), "default".to_string()],
         MessageType::List(vec!["简日内嵌".to_string()]),
         MessageCmd::Replace,
@@ -387,39 +225,196 @@ fn test_modify_config() {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
             "default": ["简日内嵌"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let mut config = serde_json::from_value::<Config>(origin).unwrap();
-    println!("{:#?}", config);
-    match msg.cmd {
-        MessageCmd::Replace => match msg.value {
-            MessageType::Text(value) => {
-                match config.get_mut_by_path(&msg.keys) {
-                    Some(content) => {
-                        let a = to_replace::<String>(content).unwrap();
-                        a.replace_an_element(value);
-                    }
-                    None => {
-                        let parent = config
-                            .get_mut_by_path(&msg.keys[..msg.keys.len() - 1])
-                            .unwrap();
-                        let map = parent.downcast_mut::<HashMap<String, String>>().unwrap();
-                        map.insert(msg.keys.pop().unwrap(), value);
-                    }
-                };
-            }
-            MessageType::List(list) => {
-                let content = config.get_mut_by_path(&msg.keys).unwrap();
-                let a = to_replace::<Vec<String>>(content).unwrap();
-                a.replace_an_element(list);
-            }
-            _ => (),
-        },
-        _ => (),
-    }
-    println!("{:#?}", config);
-    let new_config = serde_json::to_value(config).unwrap();
+    let new_config = serde_json::to_value(general_config_modify_test(origin, msg)).unwrap();
     assert_eq!(new_config, expect_result);
     // match_type!(cookies,
     //         String => {println!("String!")},
     //         Vec<String> => {println!("Vec<String>!")}
     // );
+}
+
+#[test]
+fn replace_text() {
+    let origin = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+
+    let msg = Message::new(
+        vec!["user".to_string(), "name".to_string()],
+        config_manager::MessageType::Text("master".to_string()),
+        config_manager::MessageCmd::Replace,
+        None,
+    );
+    let expect_result = serde_json::json!(
+        {"user":{"name":"master", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    let new_config = general_config_modify_test(origin, msg);
+    let result = serde_json::to_value(new_config).unwrap();
+    assert_eq!(expect_result, result);
+}
+
+#[test]
+fn append_vec_to_vec() {
+    let origin = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+
+    let msg = Message::new(
+        vec!["filter".to_string(), "611".to_string()],
+        config_manager::MessageType::List(vec!["简日内嵌".to_string(), "CHS".to_string()]),
+        config_manager::MessageCmd::Append,
+        None,
+    );
+    let expect_result = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封", "简日内嵌", "CHS"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    let new_config = general_config_modify_test(origin, msg);
+    let result = serde_json::to_value(new_config).unwrap();
+    assert_eq!(expect_result, result);
+}
+
+#[test]
+fn append_map() {
+    let origin = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+
+    let mut map1 = HashMap::<String, Vec<String>>::new();
+    map1.insert(
+        "610".to_string(),
+        vec!["简日".to_string(), "简体".to_string()],
+    );
+    map1.insert("587".to_string(), vec!["CHS".to_string()]);
+    let msg = Message::new(
+        vec!["filter".to_string()],
+        config_manager::MessageType::MapVec(map1),
+        config_manager::MessageCmd::Append,
+        None,
+    );
+    let expect_result = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "610": ["简日", "简体"], "587": ["CHS"],
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    let new_config = general_config_modify_test(origin, msg);
+    let result = serde_json::to_value(new_config).unwrap();
+    assert_eq!(expect_result, result);
+}
+
+#[test]
+fn append_text_to_vec() {
+    let origin = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+
+    let msg = Message::new(
+        vec!["filter".to_string(), "611".to_string()],
+        config_manager::MessageType::Text("简日内嵌".to_string()),
+        config_manager::MessageCmd::Append,
+        None,
+    );
+    let expect_result = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封", "简日内嵌"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    let new_config = general_config_modify_test(origin, msg);
+    let result = serde_json::to_value(new_config).unwrap();
+    assert_eq!(expect_result, result);
+}
+
+#[test]
+fn del_key() {
+    let origin = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "233": ["繁体"],
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+
+    let msg = Message::new(
+        vec!["filter".to_string(), "233".to_string()],
+        config_manager::MessageType::None,
+        config_manager::MessageCmd::Delete,
+        None,
+    );
+    let expect_result = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    let new_config = general_config_modify_test(origin, msg);
+    let result = serde_json::to_value(new_config).unwrap();
+    assert_eq!(expect_result, result);
+}
+
+#[test]
+fn del_value() {
+    let origin = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"],
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+
+    let msg = Message::new(
+        vec!["filter".to_string(), "default".to_string()],
+        config_manager::MessageType::Text("简体".to_string()),
+        config_manager::MessageCmd::Delete,
+        None,
+    );
+    let expect_result = serde_json::json!(
+        {"user":{"name":"", "password": ""},
+        "bangumi":{}, "cookies": "", 
+        "rss_links": {}, 
+        "filter": {
+            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
+            "default": ["简繁日内封", "简日内封", "简繁内封", "简日", "简繁日", "简中", "CHS"]}, 
+        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    let new_config = general_config_modify_test(origin, msg);
+    let result = serde_json::to_value(new_config).unwrap();
+    assert_eq!(expect_result, result);
 }

@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, hash_map::OccupiedEntry},
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
     vec,
 };
 
-use tokio::{sync::{Notify, Semaphore}, task::JoinHandle, time};
+use tokio::{sync::{Notify, Semaphore}, task::JoinHandle};
 
 use crate::{
     REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
@@ -75,14 +75,8 @@ pub async fn initial() -> JoinHandle<()>{
     *(TX.write().await) = Some(tx);
     let config_manager = tokio::spawn(modify_config(rx));
     // -------------------------------------------------------------------------
-    let username = CONFIG.read().await.get_value()["user"]["name"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let password = CONFIG.read().await.get_value()["user"]["password"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let username = CONFIG.read().await.get().user.name.clone();
+    let password = CONFIG.read().await.get().user.password.clone();
     println!("{:?}", get_alist_token(&username, &password).await);
     println!("{:?}", check_cookies().await);
     let _rss_refresh_handle = tokio::spawn(refresh_rss());
@@ -96,21 +90,10 @@ pub async fn initial() -> JoinHandle<()>{
 pub async fn refresh_rss() {
     'outer: loop {
         println!("\nChecking updates...\n");
-        let rss_links = CONFIG.read().await.get_value()["rss_links"].clone();
-        let username = CONFIG.read().await.get_value()["user"]["name"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let password = CONFIG.read().await.get_value()["user"]["password"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let urls = rss_links
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(_, link)| link.as_str().unwrap())
-            .collect::<Vec<_>>();
+        let rss_links = CONFIG.read().await.get().rss_links.clone();
+        let username = CONFIG.read().await.get().user.name.clone();
+        let password = CONFIG.read().await.get().user.password.clone();
+        let urls = rss_links.into_values().collect::<Vec<String>>();
         start_rss_receive(urls).await;
         println!("\nCheck finished!\n");
         tokio::time::sleep(Duration::from_secs(2700)).await;
@@ -179,9 +162,13 @@ pub async fn refresh_download() {
     let reset_wait_time = REFRESH_NOTIFY.lock().await.clone();
     'outer: loop {
         println!("running refresh download");
-        let hash_ani = match CONFIG.read().await.get_value()["hash_ani"].as_object() {
-            Some(hash_ani) if !hash_ani.is_empty() => hash_ani.clone(),
-            _ => break,
+        let hash_ani = {
+            let config = CONFIG.read().await;
+            if config.get().hash_ani.is_empty(){
+                break;
+            }else{
+                config.get().hash_ani.clone()
+            }
         };
         let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
             Ok(list) => list,
@@ -200,7 +187,7 @@ pub async fn refresh_download() {
             if task.percent_done == 100 {
                 // download file
                 let file_name = &task.name;
-                let ani_name = hash_ani[task_hash].as_str().unwrap().to_string();
+                let ani_name = hash_ani[task_hash].to_owned();
                 let path = format!("/115/云下载/{file_name}/{file_name}");
                 // check is alist working
                 if let Err(error) = check_is_alist_working().await {
@@ -242,7 +229,7 @@ pub async fn refresh_download() {
                             let msg = Message::new(
                                 vec!["hash_ani".to_string(), task_hash.to_string()],
                                 MessageType::None,
-                                MessageCmd::DeleteKey,
+                                MessageCmd::Delete,
                                 Some(notify.clone()),
                             );
                             tx.send(msg).unwrap();
@@ -287,9 +274,13 @@ pub async fn refresh_download_slow() {
     let wait_time = Duration::from_secs(3600);
     let mut error_task = HashMap::new();
     'outer: loop {
-        let hash_ani = match CONFIG.read().await.get_value()["hash_ani_slow"].as_object() {
-            Some(hash_ani) if !hash_ani.is_empty()=> hash_ani.clone(),
-            _ => break,
+        let hash_ani = {
+            let config = CONFIG.read().await;
+            if config.get().hash_ani.is_empty(){
+                break;
+            }else{
+                config.get().hash_ani.clone()
+            }
         };
         let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
             Ok(list) => list,
@@ -308,7 +299,7 @@ pub async fn refresh_download_slow() {
             if task.percent_done == 100 {
                 // download file
                 let file_name = &task.name;
-                let ani_name = hash_ani[task_hash].as_str().unwrap().to_string();
+                let ani_name = hash_ani[task_hash].clone();
                 let path = format!("/115/云下载/{file_name}/{file_name}");
                 // check is alist working
                 if let Err(error) = check_is_alist_working().await {
@@ -344,7 +335,7 @@ async fn del_a_task(task_hash: &str, dict_name: &str) {
     let msg = Message::new(
         vec![dict_name.to_string(), task_hash.to_string()],
         MessageType::None,
-        MessageCmd::DeleteKey,
+        MessageCmd::Delete,
         None,
     );
     tx.send(msg).unwrap();

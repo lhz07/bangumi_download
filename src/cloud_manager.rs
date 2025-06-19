@@ -1,5 +1,5 @@
 use crate::{
-    CLIENT_DOWNLOAD, CLIENT_PROXY, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE,
+    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE,
     config_manager::CONFIG, login_with_qrcode::login_with_qrcode,
 };
 use anyhow::anyhow;
@@ -99,7 +99,7 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), anyhow::Error> 
 pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, anyhow::Error> {
     let client = CLIENT_WITH_RETRY_MOBILE.clone();
     let config_lock = CONFIG.read().await;
-    let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
+    let cookies = &config_lock.get().cookies;
     let mut headers = HeaderMap::new();
     headers.insert(HOST, "115.com".parse().unwrap());
     headers.insert(CONNECTION, "keep-alive".parse().unwrap());
@@ -140,7 +140,7 @@ pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, anyhow::Erro
 pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
     let client = CLIENT_WITH_RETRY.clone();
     let config_lock = CONFIG.read().await;
-    let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
+    let cookies = &config_lock.get().cookies;
     let mut headers = HeaderMap::new();
     headers.insert(HOST, "115.com".parse().unwrap());
     headers.insert(CONNECTION, "keep-alive".parse().unwrap());
@@ -191,7 +191,7 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow
     let client = CLIENT_WITH_RETRY_MOBILE.clone();
     // let client = CLIENT_PROXY.clone();
     let config_lock = CONFIG.read().await;
-    let cookies = config_lock.get_value()["cookies"].as_str().unwrap();
+    let cookies = &config_lock.get().cookies;
     let mut headers = HeaderMap::new();
     headers.insert(HOST, "115.com".parse().unwrap());
     headers.insert(CONNECTION, "keep-alive".parse().unwrap());

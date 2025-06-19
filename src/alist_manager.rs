@@ -139,7 +139,7 @@ pub async fn check_cookies() -> Result<(), anyhow::Error> {
 pub async fn update_alist_cookies() -> Result<String, reqwest::Error> {
     let client = CLIENT.clone();
     let config_lock = CONFIG.read().await;
-    let cookie_str = config_lock.get_value()["cookies"].as_str().unwrap();
+    let cookie_str = &config_lock.get().cookies;
     let addition_json = serde_json::json!({"cookie": cookie_str});
     let addition = addition_json.to_string();
     let mut headers = HeaderMap::new();

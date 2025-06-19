@@ -1,16 +1,12 @@
 use crate::{
-    CLIENT_WITH_RETRY, ERROR_STATUS, TX,
-    cloud_manager::cloud_download,
-    config_manager::{CONFIG, Message, MessageCmd, MessageType},
-    main_proc::restart_refresh_download,
+    cloud_manager::cloud_download, config_manager::{Config, Message, MessageCmd, MessageType, CONFIG}, main_proc::restart_refresh_download, CLIENT_WITH_RETRY, ERROR_STATUS, TX
 };
 use futures::future::{self, join_all};
 use reqwest_middleware::ClientWithMiddleware;
 use scraper::{Element, Html, Selector};
 use serde::Deserialize;
-use serde_json::{Value, json};
 use std::{
-    error::Error, sync::{atomic::AtomicI32, Arc}, vec
+    collections::HashMap, sync::{atomic::AtomicI32, Arc}, vec
 };
 use quick_xml::de;
 use regex::Regex;
@@ -83,12 +79,12 @@ pub async fn get_response_text(
     }
 }
 
-pub async fn start_rss_receive(urls: Vec<&str>) {
+pub async fn start_rss_receive(urls: Vec<String>) {
     // read the config
-    let old_config: Value = CONFIG.read().await.get_value().clone();
+    let old_config = CONFIG.read().await.get().clone();
     // create the sender futures
     let mut futs = Vec::new();
-    for url in urls {
+    for url in &urls {
         let tx = match TX.read().await.clone() {
             Some(tx) => tx,
             None => return,
@@ -104,20 +100,20 @@ pub async fn start_rss_receive(urls: Vec<&str>) {
     }
 }
 
-pub fn filter_episode<'a, T:Filter>(items: &'a Vec<T>, filter: &Value, sub_id: &str) -> Vec<&'a str> {
-    let default_filters = filter["default"].as_array().unwrap();
+pub fn filter_episode<'a, T:Filter>(items: &'a Vec<T>, filter: &HashMap<String, Vec<String>>, sub_id: &str) -> Vec<&'a str> {
+    let default_filters = &filter["default"];
     let mut best_filter: Option<&str> = None;
-    let empty_filter: Vec<Value> = Vec::new();
-    let candidate_filters = match filter[&sub_id].as_array() {
+    let empty_filter: Vec<String> = Vec::new();
+    let candidate_filters = match filter.get(sub_id) {
         Some(sub_filters) => sub_filters.iter().chain(default_filters.iter()),
-        None => empty_filter.iter().chain(default_filters),
+        None => empty_filter.iter().chain(default_filters.iter()),
     };
     'outer: for candidate_filter in candidate_filters {
         for item in items {
             if item.title()
-                .contains(candidate_filter.as_str().unwrap())
+                .contains(candidate_filter)
             {
-                best_filter = Some(candidate_filter.as_str().unwrap());
+                best_filter = Some(candidate_filter);
                 break 'outer;
             }
         }
@@ -147,7 +143,7 @@ pub fn filter_episode<'a, T:Filter>(items: &'a Vec<T>, filter: &Value, sub_id: &
 pub async fn get_all_episode_magnet_links(
     ani_id: &str,
     sub_id: &str,
-    filter: &Value,
+    filter: &HashMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
     let url = format!(
         "https://mikanime.tv/Home/ExpandEpisodeTable?bangumiId={ani_id}&subtitleGroupId={sub_id}&take=100"
@@ -257,7 +253,7 @@ pub async fn check_rss_link(url: &str) -> Result<(), String> {
 pub async fn rss_receive(
     tx: mpsc::UnboundedSender<Message>,
     url: &str,
-    old_config: &Value,
+    old_config: &Config,
     client: ClientWithMiddleware,
 ) -> Result<(), anyhow::Error> {
     let response = client.get(url).send().await?.text().await?;
@@ -296,7 +292,7 @@ pub async fn rss_receive(
     let latest_update = latest_item.torrent.pub_date.clone();
     let bangumi_id = format!("{ani_id}&{sub_id}");
     // check if the bangumi updates and is it first time to be added
-    let old_bangumi_dict = old_config["bangumi"].as_object().unwrap();
+    let old_bangumi_dict = &old_config.bangumi;
     let mut magnet_links: Vec<String> = Vec::new();
     if !old_bangumi_dict.contains_key(&bangumi_id) {
         // write to config
@@ -308,7 +304,7 @@ pub async fn rss_receive(
         );
         tx.send(msg)?;
         if let Some(links) =
-            get_all_episode_magnet_links(&ani_id, &sub_id, &old_config["filter"]).await
+            get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await
         {
             magnet_links = links
         }
@@ -327,13 +323,13 @@ pub async fn rss_receive(
             .rev();
         for item in &mut item_iter {
             let pub_date = &item.torrent.pub_date;
-            if pub_date == old_bangumi_dict[&bangumi_id].as_str().unwrap() {
+            if *pub_date == old_bangumi_dict[&bangumi_id] {
                 break;
             }
         }
         let new_items = item_iter.collect::<Vec<_>>();
         println!("获取到以下剧集：");
-        let filter = &old_config["filter"];
+        let filter = &old_config.filter;
         let item_links = filter_episode(&new_items, filter, &sub_id);
         magnet_links = match get_all_magnet(item_links).await {
             Ok(links) => links,
@@ -352,11 +348,11 @@ pub async fn rss_receive(
         );
         tx.send(msg)?;
     }
-    if let Some(magnets) = old_config["magnets"][&title].as_array() {
+    if let Some(magnets) = old_config.magnets.get(&title) {
         magnet_links.append(
             &mut magnets
                 .iter()
-                .map(|i| i.as_str().unwrap().to_string())
+                .map(|i| i.clone())
                 .collect::<Vec<_>>(),
         );
     }
@@ -364,14 +360,14 @@ pub async fn rss_receive(
         println!("There are some magnet links of {}, let's download them!", title);
         match cloud_download(&magnet_links).await {
             Ok(hash_list) => {
-                let mut hash_ani = serde_json::Map::new();
+                let mut hash_ani = HashMap::new();
                 for i in &hash_list {
-                    hash_ani.insert(i.clone(), Value::String(title.clone()));
+                    hash_ani.insert(i.clone(), title.clone());
                 }
                 let msg = Message::new(
                     vec!["magnets".to_string(), title.to_string()],
                     MessageType::None,
-                    MessageCmd::DeleteKey,
+                    MessageCmd::Delete,
                     None,
                 );
                 tx.send(msg).unwrap();
