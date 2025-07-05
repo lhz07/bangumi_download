@@ -11,7 +11,7 @@ env:
 
 jobs:
   build_on_macos:
-    name: build on macos
+    name: build on macOS
     runs-on: macos-15
     steps:
     - name: add target
@@ -25,6 +25,22 @@ jobs:
     - name: Build for macOS
       run: cargo build --verbose --release
     - name: Cross compile for Linux
+      run: cargo build --verbose --release --target x86_64-unknown-linux-musl
+    - name: Run tests
+      run: cargo test --verbose
+  build_on_linux:
+    name: build on Linux
+    runs-on: ubuntu-latest
+    steps:
+    - name: add target
+      run: rustup target add x86_64-unknown-linux-musl
+    - name: install dependencies
+      run: apt update && apt install -y musl-tools
+    - name: Pull code
+      uses: actions/checkout@v4.2.2
+    - name: Check format
+      run: cargo fmt --check
+    - name: Build for Linux
       run: cargo build --verbose --release --target x86_64-unknown-linux-musl
     - name: Run tests
       run: cargo test --verbose
