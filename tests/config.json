@@ -1,0 +1,44 @@
+{
+  "bangumi": {
+    "3523&611": "2025-03-22T00:20:10.53",
+    "3623&382": "2025-07-03T03:15:00",
+    "3644&576": "2025-05-28T20:14:00.623",
+    "3623&370": "2025-07-03T13:09:00.388"
+  },
+  "cookies": "xxxxxxx",
+  "filter": {
+    "611": [
+      "内封"
+    ],
+    "570": [
+      "内封"
+    ],
+    "583": [
+      "CHT"
+    ],
+    "default": [
+      "简繁日内封",
+      "简日内封",
+      "简繁内封",
+      "内封",
+      "简体",
+      "简日",
+      "简繁日",
+      "简中",
+      "CHS"
+    ]
+  },
+  "hash_ani": {},
+  "hash_ani_slow": {},
+  "magnets": {},
+  "rss_links": {
+    "[MingYSub] 莉可丽丝：友谊是时间的窃贼": "https://mikanime.tv/RSS/Bangumi?bangumiId=3644&subgroupid=576",
+    "[北宇治字幕组] 坂本日常": "https://mikanime.tv/RSS/Bangumi?bangumiId=3523&subgroupid=611",
+    "[喵萌奶茶屋] 时光流逝，饭菜依旧美味": "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=382",
+    "[LoliHouse] 时光流逝，饭菜依旧美味": "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=370"
+  },
+  "user": {
+    "name": "lhz",
+    "password": "xxxxxxx"
+  }
+}

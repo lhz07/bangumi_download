@@ -142,13 +142,13 @@ pub async fn modify_config(mut rx: mpsc::UnboundedReceiver<Message>) {
         println!("waiting for the next msg...");
     }
     println!("exit modify config");
-    #[cfg(not(test))]
-    {
-        use crate::ERROR_STATUS;
-        if *ERROR_STATUS.read().await {
-            std::process::exit(1);
-        } else {
-            std::process::exit(0);
-        }
-    }
+    // #[cfg(not(test))]
+    // {
+    //     use crate::ERROR_STATUS;
+    //     if *ERROR_STATUS.read().await {
+    //         std::process::exit(1);
+    //     } else {
+    //         std::process::exit(0);
+    //     }
+    // }
 }

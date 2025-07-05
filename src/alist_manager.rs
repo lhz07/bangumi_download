@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::anyhow;
 use once_cell::sync::Lazy;
@@ -11,7 +8,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, RwLock};
 
 use crate::{
-    cloud_manager::{download_file, get_cloud_cookies}, config_manager::{Message, Config, CONFIG}, CLIENT, TX
+    CLIENT, TX,
+    cloud_manager::{download_file, get_cloud_cookies},
+    config_manager::{CONFIG, Config, Message},
 };
 static TOKEN: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
@@ -120,15 +119,16 @@ pub async fn check_cookies() -> Result<(), anyhow::Error> {
         eprintln!("{}", response_json["data"]["status"]);
         println!("Cookies is expired, try to update...");
         let cookies = get_cloud_cookies().await;
-        let tx = TX.read().await.clone().unwrap();
+        let tx = TX
+            .load()
+            .as_deref()
+            .ok_or_else(|| anyhow::Error::msg("exiting now..."))?
+            .clone();
         let notify = Arc::new(Notify::new());
-        let cmd = Box::new(|config: &mut Config|{
+        let cmd = Box::new(|config: &mut Config| {
             config.cookies = cookies;
         });
-        let msg = Message::new(
-            cmd,
-            Some(notify.clone()),
-        );
+        let msg = Message::new(cmd, Some(notify.clone()));
         tx.send(msg).unwrap();
         notify.notified().await;
         update_alist_cookies().await?;
@@ -197,7 +197,7 @@ pub async fn download_a_task(path: &str, ani_name: &str) -> Result<(), anyhow::E
 
 pub async fn check_is_alist_working() -> Result<(), anyhow::Error> {
     let client = CLIENT.clone();
-    match client.get("http://127.0.0.1:5244").send().await{
+    match client.get("http://127.0.0.1:5244").send().await {
         Ok(response) => {
             if response.status() == 200 {
                 Ok(())
@@ -205,6 +205,6 @@ pub async fn check_is_alist_working() -> Result<(), anyhow::Error> {
                 Err(anyhow!("Alist is not working! Response: {response:?}"))
             }
         }
-        Err(_) => Err(anyhow!("Can not connect to Alist! Is it running?"))
+        Err(_) => Err(anyhow!("Can not connect to Alist! Is it running?")),
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
-    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE,
-    config_manager::CONFIG, login_with_qrcode::login_with_qrcode,
+    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, config_manager::CONFIG,
+    login_with_qrcode::login_with_qrcode,
 };
 use anyhow::anyhow;
 use indicatif::{ProgressBar, ProgressStyle};

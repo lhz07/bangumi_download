@@ -9,11 +9,11 @@ use crate::socket_utils::SocketStream;
 //     }};
 // }
 
-pub trait WriteToOutput{
+pub trait WriteToOutput {
     fn print(&mut self, content: String) -> impl std::future::Future<Output = ()> + Send;
 }
 
-impl WriteToOutput for SocketStream{
+impl WriteToOutput for SocketStream {
     async fn print(&mut self, content: String) {
         self.write_str(&content).await.unwrap();
     }
@@ -21,7 +21,7 @@ impl WriteToOutput for SocketStream{
 
 struct _StdOut;
 
-impl WriteToOutput for _StdOut{
+impl WriteToOutput for _StdOut {
     async fn print(&mut self, content: String) -> () {
         println!("{}", content);
     }

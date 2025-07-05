@@ -99,8 +99,7 @@ async fn test_status_iter() {
     ];
     let mut count = 0;
     let mut wait_time = StatusIter::new(&WAIT_TIME_LIST);
-    let reset_wait_time = REFRESH_NOTIFY.lock().await.clone();
-    reset_wait_time.add_permits(1);
+    REFRESH_NOTIFY.add_permits(1);
     let timer = Instant::now();
     loop {
         let t = *wait_time.next().unwrap();
@@ -110,7 +109,7 @@ async fn test_status_iter() {
         }
         count += 1;
         println!("count: {}", count);
-        match tokio::time::timeout(t, reset_wait_time.consume()).await {
+        match tokio::time::timeout(t, REFRESH_NOTIFY.consume()).await {
             Ok(_) => wait_time.reset(),
             Err(_) => continue,
         }
@@ -128,16 +127,13 @@ async fn test_xml() {
     )
     .await
     .unwrap();
-    let result = de::from_str::<RSS>(&response);
-    assert!(result.is_ok());
+    let _result = de::from_str::<RSS>(&response).unwrap();
 }
 
 #[test]
 fn test_serialize_config() {
-    let config_str = read_to_string("config.json").unwrap();
-    let config = serde_json::from_str::<Config>(&config_str);
-    assert!(config.is_ok());
-    // println!("{:#?}", config);
+    let config_str = read_to_string("tests/config.json").unwrap();
+    let _config = serde_json::from_str::<Config>(&config_str).unwrap();
 }
 
 fn general_config_modify_test(origin: Value, msg: Message) -> Config {
@@ -151,6 +147,7 @@ fn general_config_modify_test(origin: Value, msg: Message) -> Config {
 #[tokio::test]
 async fn config_test() {
     use config_manager::CONFIG;
+    use std::sync::Arc;
     let origin = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -174,10 +171,7 @@ async fn config_test() {
     let cmd = Box::new(|config: &mut Config| {
         config.filter.extend(map1.into_iter());
     });
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -209,10 +203,7 @@ fn replace_vec() {
     let cmd = Box::new(|config: &mut Config| {
         *config.filter.get_mut("default").unwrap() = vec!["简日内嵌".to_string()];
     });
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -240,10 +231,7 @@ fn replace_text() {
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
     let cmd = Box::new(|config: &mut Config| config.user.name = "master".to_string());
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"master", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -274,10 +262,7 @@ fn append_vec_to_vec() {
             .unwrap()
             .append(&mut vec!["简日内嵌".to_string(), "CHS".to_string()]);
     });
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -311,10 +296,7 @@ fn append_map() {
     let cmd = Box::new(|config: &mut Config| {
         config.filter.extend(map1.into_iter());
     });
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -345,10 +327,7 @@ fn append_text_to_vec() {
             .unwrap()
             .push("简日内嵌".to_string());
     });
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -375,10 +354,7 @@ fn del_key() {
     let cmd = Box::new(|config: &mut Config| {
         config.filter.remove("233");
     });
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -409,10 +385,7 @@ fn del_value() {
             .unwrap()
             .remove_an_element(&"简体".to_string());
     });
-    let msg = Message::new(
-        cmd,
-        None,
-    );
+    let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
         {"user":{"name":"", "password": ""},
         "bangumi":{}, "cookies": "", 
@@ -424,4 +397,26 @@ fn del_value() {
     let new_config = general_config_modify_test(origin, msg);
     let result = serde_json::to_value(new_config).unwrap();
     assert_eq!(expect_result, result);
+}
+
+// this is an example of deadlock
+#[tokio::test]
+async fn deadlock() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    let mutex = Arc::new(Mutex::new(Some("dummy")));
+    let m1 = mutex.clone();
+
+    if let Some(_) = m1.lock().await.take() {
+        // lock here
+        match tokio::time::timeout(Duration::from_secs(2), m1.lock()).await {
+            Ok(_) => {
+                println!("got lock");
+                unreachable!("it should be deadlock here");
+            }
+            Err(e) => eprintln!("can not lock: {}", e),
+        }
+    }
 }

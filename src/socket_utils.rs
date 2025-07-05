@@ -208,7 +208,7 @@ impl SocketStreamHandle for SocketStream {
                     let rss_link = stream.read_str().await.unwrap();
                     match check_rss_link(&rss_link).await {
                         Ok(()) => {
-                            let tx = TX.read().await.clone().unwrap();
+                            let tx = TX.load().as_deref().unwrap().clone();
                             let old_config = CONFIG.load_full();
                             rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
                                 .await

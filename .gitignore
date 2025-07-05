@@ -1,5 +1,5 @@
 /target
-config.json
+/config.json
 src/1.py
 .DS_Store
 downloads

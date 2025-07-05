@@ -3,14 +3,13 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-
 use tokio::{
     sync::{Notify, Semaphore},
     task::JoinHandle,
 };
 
 use crate::{
-    REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
+    END_NOTIFY, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
     alist_manager::{
         check_cookies, check_is_alist_working, download_a_task, get_alist_name_passwd,
         get_alist_token,
@@ -75,7 +74,7 @@ pub async fn initial() -> JoinHandle<()> {
     }
     // launch config write thread
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-    *(TX.write().await) = Some(tx);
+    TX.swap(Some(Arc::new(tx)));
     let config_manager = tokio::spawn(modify_config(rx));
     // -------------------------------------------------------------------------
     let username = &CONFIG.load().user.name;
@@ -102,7 +101,14 @@ pub async fn refresh_rss() {
         let urls = rss_links.values().collect::<Vec<&String>>();
         start_rss_receive(urls).await;
         println!("\nCheck finished!\n");
-        tokio::time::sleep(Duration::from_secs(2700)).await;
+        println!("refresh rss is sleeping");
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2700)) => {}
+            _ = END_NOTIFY.notified() => {
+                println!("break refresh rss!");
+                break;
+            }
+        }
         // check is alist working
         if let Err(error) = check_is_alist_working().await {
             eprintln!("{error}");
@@ -122,7 +128,10 @@ pub async fn refresh_rss() {
                 match select {
                     "y" => {
                         let (name, password) = get_alist_name_passwd().await;
-                        let tx = TX.read().await.clone().unwrap();
+                        let tx = match TX.load().as_deref() {
+                            Some(tx) => tx.clone(),
+                            None => return,
+                        };
                         let cmd = Box::new(|config: &mut Config| {
                             config.user.name = name;
                         });
@@ -147,9 +156,11 @@ pub async fn refresh_rss() {
             }
         }
     }
+    println!("exit refresh rss");
 }
 
 pub async fn refresh_download() {
+    println!("refresh download is started");
     const WAIT_TIME_LIST: [Duration; 6] = [
         Duration::from_secs(10),
         Duration::from_secs(60),
@@ -161,7 +172,6 @@ pub async fn refresh_download() {
     let mut wait_time = StatusIter::new(&WAIT_TIME_LIST);
     let mut error_task = HashMap::new();
     let mut task_download_time: HashMap<String, Instant> = HashMap::new();
-    let reset_wait_time = REFRESH_NOTIFY.lock().await.clone();
     'outer: loop {
         println!("running refresh download");
         let hash_ani = {
@@ -219,7 +229,10 @@ pub async fn refresh_download() {
                     Some(instant) => {
                         if instant.elapsed().as_secs() > 1800 {
                             // move to slow queue
-                            let tx = TX.read().await.clone().unwrap();
+                            let tx = match TX.load().as_deref() {
+                                Some(tx) => tx.clone(),
+                                None => return,
+                            };
                             let insert_key = task_hash.to_string();
                             let insert_value = hash_ani[task_hash].to_string();
                             let cmd = Box::new(|config: &mut Config| {
@@ -245,33 +258,47 @@ pub async fn refresh_download() {
                 }
             }
         }
-        match tokio::time::timeout(*wait_time.next().unwrap(), reset_wait_time.consume()).await {
-            Ok(_) => wait_time.reset(),
-            Err(_) => continue,
+        let wait_task = tokio::time::timeout(*wait_time.next().unwrap(), REFRESH_NOTIFY.consume());
+        tokio::select! {
+            result = wait_task => {
+                match result {
+                    Ok(_) => wait_time.reset(),
+                    Err(_) => continue,
+                }
+            }
+            _ = END_NOTIFY.notified() => {
+                break;
+            }
         }
     }
+    println!("refresh download is finished");
 }
 
 pub async fn restart_refresh_download() {
-    REFRESH_NOTIFY.lock().await.add_permits(1);
-    if let Some(_) = REFRESH_DOWNLOAD.lock().await.take_if(|h| h.is_finished()) {
+    REFRESH_NOTIFY.add_permits(1);
+    let handle = REFRESH_DOWNLOAD_SLOW
+        .lock()
+        .await
+        .take_if(|h| h.is_finished());
+    if handle.is_some() {
         let download_handle = tokio::spawn(refresh_download());
         REFRESH_DOWNLOAD.lock().await.replace(download_handle);
     }
 }
 
 pub async fn restart_refresh_download_slow() {
-    if let Some(_) = REFRESH_DOWNLOAD_SLOW
+    let handle = REFRESH_DOWNLOAD_SLOW
         .lock()
         .await
-        .take_if(|h| h.is_finished())
-    {
+        .take_if(|h| h.is_finished());
+    if handle.is_some() {
         let download_handle = tokio::spawn(refresh_download_slow());
         REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
     }
 }
 
 pub async fn refresh_download_slow() {
+    println!("refresh download slow is started");
     let wait_time = Duration::from_secs(3600);
     let mut error_task = HashMap::new();
     'outer: loop {
@@ -328,6 +355,7 @@ pub async fn refresh_download_slow() {
         }
         tokio::time::sleep(wait_time).await;
     }
+    println!("refresh download slow is finished");
 }
 struct HashAni;
 struct HashAniSlow;
@@ -335,13 +363,13 @@ trait DeleteTask {
     fn del_a_task(task_hash: String) -> Box<impl Fn(&mut Config) + Send + Sync>;
 }
 impl DeleteTask for HashAni {
-    fn del_a_task(task_hash: String) -> Box<impl Fn(&mut Config) + Send + Sync>{
+    fn del_a_task(task_hash: String) -> Box<impl Fn(&mut Config) + Send + Sync> {
         Box::new(move |config: &mut Config| {
             config.hash_ani.remove(&task_hash);
         })
     }
 }
-impl DeleteTask for HashAniSlow{
+impl DeleteTask for HashAniSlow {
     fn del_a_task(task_hash: String) -> Box<impl Fn(&mut Config) + Send + Sync> {
         Box::new(move |config: &mut Config| {
             config.hash_ani_slow.remove(&task_hash);
@@ -350,7 +378,7 @@ impl DeleteTask for HashAniSlow{
 }
 async fn del_a_task<T: DeleteTask + 'static>(task_hash: &str) {
     del_cloud_task(task_hash).await.unwrap();
-    let tx = TX.read().await.clone().unwrap();
+    let tx = TX.load().as_deref().unwrap().clone();
     let cmd = T::del_a_task(task_hash.to_string());
     let msg = Message::new(cmd, None);
     tx.send(msg).unwrap();

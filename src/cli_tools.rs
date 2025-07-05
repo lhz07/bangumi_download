@@ -49,7 +49,5 @@ impl Cli {
         stream.write_str("Update!").await.unwrap();
         println!("stream: {}", stream.read_str().await.unwrap());
     }
-    pub async fn exit() {
-        
-    }
+    pub async fn exit() {}
 }

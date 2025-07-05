@@ -89,14 +89,19 @@ pub async fn start_rss_receive(urls: Vec<&String>) {
     // create the sender futures
     let mut futs = Vec::new();
     for url in urls {
-        let tx = match TX.read().await.clone() {
-            Some(tx) => tx,
-            None => return,
+        let tx = match TX.load().as_deref() {
+            Some(tx) => tx.clone(),
+            None => {
+                println!("exiting...");
+                return;
+            }
         };
         futs.push(rss_receive(tx, url, &old_config, CLIENT_WITH_RETRY.clone()));
     }
     // get the results
+    println!("waiting for refreshing rss");
     let results = future::join_all(futs).await;
+    println!("rss refresh finished");
     for result in results {
         if let Err(error) = result {
             eprintln!("{}", error);
@@ -308,9 +313,7 @@ pub async fn rss_receive(
         // write to config
         let insert_key = format!("{ani_id}&{sub_id}");
         let cmd = Box::new(|config: &mut Config| {
-            config
-                .bangumi
-                .insert(insert_key, latest_update);
+            config.bangumi.insert(insert_key, latest_update);
         });
         let msg = Message::new(cmd, None);
         tx.send(msg)?;
@@ -344,16 +347,14 @@ pub async fn rss_receive(
             Ok(links) => links,
             Err(error) => {
                 eprintln!("Error: {:?}", error);
-                *ERROR_STATUS.write().await = true;
-                drop(TX.write().await.take());
+                ERROR_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
+                drop(TX.swap(None));
                 return Err(anyhow::anyhow!("Can not get magnet links!"));
             }
         };
         let insert_key = format!("{ani_id}&{sub_id}");
         let cmd = Box::new(|config: &mut Config| {
-            config
-                .bangumi
-                .insert(insert_key, latest_update);
+            config.bangumi.insert(insert_key, latest_update);
         });
         let msg = Message::new(cmd, None);
         tx.send(msg)?;
@@ -366,13 +367,14 @@ pub async fn rss_receive(
             "There are some magnet links of {}, let's download them!",
             title
         );
+        println!("waiting for cloud download");
         match cloud_download(&magnet_links).await {
             Ok(hash_list) => {
                 let mut hash_ani = HashMap::new();
                 for i in &hash_list {
                     hash_ani.insert(i.clone(), title.clone());
                 }
-                let cmd = Box::new(move|config: &mut Config| {
+                let cmd = Box::new(move |config: &mut Config| {
                     config.magnets.remove(&title);
                 });
                 let msg = Message::new(cmd, None);
@@ -384,20 +386,23 @@ pub async fn rss_receive(
                 let msg = Message::new(cmd, Some(notify.clone()));
                 tx.send(msg).expect("can not send to config thread!");
                 notify.notified().await;
+                println!("restart refresh download in rss receive");
                 restart_refresh_download().await;
+                println!("finish restart refresh download");
             }
             Err(error) => {
                 eprintln!("Error: {:?}", error);
-                let cmd = Box::new(move |config: &mut Config|{
-                    config.magnets.get_mut(&title).unwrap().append(&mut magnet_links);
+                let cmd = Box::new(move |config: &mut Config| {
+                    config
+                        .magnets
+                        .entry(title)
+                        .and_modify(|list| list.append(&mut magnet_links))
+                        .or_insert(magnet_links);
                 });
-                let msg = Message::new(
-                    cmd,
-                    None,
-                );
+                let msg = Message::new(cmd, None);
                 tx.send(msg).expect("can not send to config thread!");
-                *ERROR_STATUS.write().await = true;
-                drop(TX.write().await.take());
+                ERROR_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
+                drop(TX.swap(None));
                 return Err(anyhow::anyhow!("Can not add magnet to cloud!"));
             }
         }
