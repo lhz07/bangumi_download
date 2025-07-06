@@ -203,9 +203,10 @@ async fn get_subgroup_name(url: &str, client: ClientWithMiddleware) -> Option<St
 }
 
 pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, &str> {
+    let client = CLIENT_WITH_RETRY.clone();
     let futs = item_urls
         .iter()
-        .map(|url| get_a_magnet_link(url))
+        .map(|url| get_a_magnet_link(url, client.clone()))
         .collect::<Vec<_>>();
     let results = join_all(futs).await;
     println!("process links");
@@ -222,15 +223,14 @@ pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, &str> {
     Ok(magnet_links)
 }
 
-pub async fn get_a_magnet_link(url: &str) -> Option<String> {
+pub async fn get_a_magnet_link(url: &str, client: ClientWithMiddleware) -> Option<String> {
     let try_times = AtomicI32::new(0);
     let response = match Retry::spawn(FibonacciBackoff::from_millis(5000).take(3), async || {
         if try_times.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             eprintln!("can not open {url}, waiting for retry.");
         }
         try_times.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let client = CLIENT_WITH_RETRY.clone();
-        let res = get_response_text(url, client).await?;
+        let res = get_response_text(url, client.clone()).await?;
         Ok::<String, anyhow::Error>(res)
     })
     .await
@@ -252,12 +252,12 @@ pub async fn get_a_magnet_link(url: &str) -> Option<String> {
     Some(magnet_link)
 }
 
-pub async fn check_rss_link(url: &str) -> Result<(), String> {
+pub async fn check_rss_link(url: &str, client: ClientWithMiddleware) -> Result<(), String> {
     let pattern = Regex::new(r"^https?://mikanime\.tv/RSS/Bangumi\?(bangumiId=\d+&subgroupid=\d+|subgroupid=\d+&bangumiId=\d+)$").unwrap();
     if let None = pattern.captures(url) {
         return Err("Invalid url!".into());
     }
-    let response = match get_response_text(url, CLIENT_WITH_RETRY.clone()).await {
+    let response = match get_response_text(url, client).await {
         Ok(response) => response,
         Err(error) => return Err(format!("can not visit rss url, error: {}", error).into()),
     };

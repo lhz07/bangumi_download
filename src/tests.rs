@@ -13,12 +13,25 @@ use serde_json::Value;
 #[tokio::test]
 async fn test_get_a_magnet_link() {
     use crate::update_rss::get_a_magnet_link;
+    let client = ClientBuilder::new(
+        reqwest::Client::builder()
+            .user_agent(PC_UA)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap(),
+    )
+    .with(RetryTransientMiddleware::new_with_policy(
+        ExponentialBackoff::builder().build_with_max_retries(5),
+    ))
+    .build();
     assert_eq!(
         Some(
             "magnet:?xt=urn:btih:af9e3cd950cad3c3d8d345e3133cee2ecd93fd5d&tr=http%3a%2f%2ft.nyaatracker.com%2fannounce&tr=http%3a%2f%2ftracker.kamigami.org%3a2710%2fannounce&tr=http%3a%2f%2fshare.camoe.cn%3a8080%2fannounce&tr=http%3a%2f%2fopentracker.acgnx.se%2fannounce&tr=http%3a%2f%2fanidex.moe%3a6969%2fannounce&tr=http%3a%2f%2ft.acg.rip%3a6699%2fannounce&tr=https%3a%2f%2ftr.bangumi.moe%3a9696%2fannounce&tr=udp%3a%2f%2ftr.bangumi.moe%3a6969%2fannounce&tr=http%3a%2f%2fopen.acgtracker.com%3a1096%2fannounce&tr=udp%3a%2f%2ftracker.opentrackr.org%3a1337%2fannounce"
         ),
         get_a_magnet_link(
-            "https://mikanime.tv/Home/Episode/af9e3cd950cad3c3d8d345e3133cee2ecd93fd5d"
+            "https://mikanime.tv/Home/Episode/af9e3cd950cad3c3d8d345e3133cee2ecd93fd5d",
+            client
         )
         .await
         .as_deref()
@@ -55,8 +68,20 @@ async fn test_check_rss_link() {
         ),
     ];
     let mut futs = Vec::new();
+    let client = ClientBuilder::new(
+        reqwest::Client::builder()
+            .user_agent(PC_UA)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap(),
+    )
+    .with(RetryTransientMiddleware::new_with_policy(
+        ExponentialBackoff::builder().build_with_max_retries(5),
+    ))
+    .build();
     for url in urls {
-        futs.push(check_rss_link(url));
+        futs.push(check_rss_link(url, client.clone()));
     }
     // get the results
     let check_results = futures::future::join_all(futs).await;
@@ -117,13 +142,25 @@ async fn test_status_iter() {
     assert_eq!(timer.elapsed().as_secs(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_xml() {
     use crate::update_rss::RSS;
     use crate::update_rss::get_response_text;
+    let client = ClientBuilder::new(
+        reqwest::Client::builder()
+            .user_agent(PC_UA)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap(),
+    )
+    .with(RetryTransientMiddleware::new_with_policy(
+        ExponentialBackoff::builder().build_with_max_retries(5),
+    ))
+    .build();
     let response = get_response_text(
         "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=370",
-        CLIENT_WITH_RETRY.clone(),
+        client,
     )
     .await
     .unwrap();
