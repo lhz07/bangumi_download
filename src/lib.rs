@@ -7,6 +7,7 @@ pub mod main_proc;
 pub mod output_tools;
 pub mod socket_utils;
 pub mod update_rss;
+pub mod crypto;
 
 #[cfg(test)]
 pub mod tests;

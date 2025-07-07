@@ -29,3 +29,6 @@ tokio = {version = "1.44.1", features = ["full"]}
 tokio-retry = "0.3.0"
 arc-swap = "1.7.1"
 ctrlc = "3.4.7"
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
+rand = "0.9.1"

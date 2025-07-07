@@ -457,3 +457,25 @@ async fn deadlock() {
         }
     }
 }
+
+#[test]
+fn test_rsa(){
+    use crypto::rsa;
+    let buf = [2u8, 3, 6, 4, 5, 76, 23, 33];
+    let result = rsa::rsa_encrypt(&buf);
+    println!("{:?}", result);
+}
+
+#[test]
+fn test_xor(){
+    use crypto::xor;
+    let key = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let mut input = vec![2u8, 3, 3, 3, 16, 32, 18];
+    let mut buf = key.to_vec();
+    buf.append(&mut input);
+    // xorTransform(buf[16:], xorDeriveKey(key[:], 4))
+    xor::xor_transform(&mut buf[16..], &xor::xor_derive_key(&key, 4));
+    buf[16..].reverse();
+    xor::xor_transform(&mut buf[16..], &xor::XOR_CLIENT_KEY);
+    println!("{:?}", buf);
+}
