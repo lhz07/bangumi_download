@@ -1,2 +1,2 @@
-pub mod xor;
 pub mod rsa;
+pub mod xor;

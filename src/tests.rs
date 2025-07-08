@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs::read_to_string};
 
 use super::*;
-use crate::config_manager::Config;
+use crate::{cloud::download::encode, config_manager::Config};
 use config_manager::*;
 use quick_xml::de;
 use serde_json::Value;
@@ -459,7 +459,7 @@ async fn deadlock() {
 }
 
 #[test]
-fn test_rsa(){
+fn test_rsa() {
     use crypto::rsa;
     let buf = [2u8, 3, 6, 4, 5, 76, 23, 33];
     let result = rsa::rsa_encrypt(&buf);
@@ -467,7 +467,7 @@ fn test_rsa(){
 }
 
 #[test]
-fn test_xor(){
+fn test_xor() {
     use crypto::xor;
     let key = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let mut input = vec![2u8, 3, 3, 3, 16, 32, 18];
@@ -478,4 +478,12 @@ fn test_xor(){
     buf[16..].reverse();
     xor::xor_transform(&mut buf[16..], &xor::XOR_CLIENT_KEY);
     println!("{:?}", buf);
+}
+
+#[test]
+fn test_encode() {
+    let key = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let input = vec![2u8, 3, 3, 3, 16, 32, 18];
+    let result = encode(input, &key);
+    println!("{}", result);
 }

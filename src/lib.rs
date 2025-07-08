@@ -1,13 +1,14 @@
 pub mod alist_manager;
 pub mod cli_tools;
+pub mod cloud;
 pub mod cloud_manager;
 pub mod config_manager;
+pub mod crypto;
 pub mod login_with_qrcode;
 pub mod main_proc;
 pub mod output_tools;
 pub mod socket_utils;
 pub mod update_rss;
-pub mod crypto;
 
 #[cfg(test)]
 pub mod tests;
