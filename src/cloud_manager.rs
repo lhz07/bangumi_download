@@ -9,7 +9,7 @@ use reqwest::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, USER_AGENT,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{cell::Cell, collections::HashMap, path::Path};
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_retry::{Retry, strategy::FixedInterval};
@@ -31,6 +31,10 @@ pub struct Task {
     pub percent_done: i32,
     pub name: String,
     pub status: i32,
+    #[serde(rename = "file_id")]
+    pub folder_id: String,
+    #[serde(rename = "delete_file_id")]
+    pub file_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,4 +256,27 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow
         current_tasks.append(&mut left_tasks);
     }
     Ok(current_tasks)
+}
+
+pub async fn list_files(folder_id: String) {
+    let _params = json!(
+        {
+            "aid": "1",
+            "cid": folder_id,
+            "o": "user_ptime",
+            "asc": "0",
+            "offset": "168",
+            "show_dir": "1",
+            "limit": "56",
+            "code": "",
+            "scid": "",
+            "snap": "0",
+            "natsort": "1",
+            "record_open_time": "1",
+            "count_folders": "1",
+            "type": "",
+            "source": "",
+            "format": "json",
+        }
+    );
 }

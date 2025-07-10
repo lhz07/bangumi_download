@@ -1,7 +1,10 @@
-use std::{collections::HashMap, fs::read_to_string};
+use std::{collections::HashMap, fs::read_to_string, sync::Arc};
 
 use super::*;
-use crate::{cloud::download::encode, config_manager::Config};
+use crate::{
+    cloud::download::{encode, get_download_link},
+    config_manager::Config,
+};
 use config_manager::*;
 use quick_xml::de;
 use serde_json::Value;
@@ -459,21 +462,12 @@ async fn deadlock() {
 }
 
 #[test]
-fn test_rsa() {
-    use crypto::rsa;
-    let buf = [2u8, 3, 6, 4, 5, 76, 23, 33];
-    let result = rsa::rsa_encrypt(&buf);
-    println!("{:?}", result);
-}
-
-#[test]
 fn test_xor() {
     use crypto::xor;
     let key = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let mut input = vec![2u8, 3, 3, 3, 16, 32, 18];
     let mut buf = key.to_vec();
     buf.append(&mut input);
-    // xorTransform(buf[16:], xorDeriveKey(key[:], 4))
     xor::xor_transform(&mut buf[16..], &xor::xor_derive_key(&key, 4));
     buf[16..].reverse();
     xor::xor_transform(&mut buf[16..], &xor::XOR_CLIENT_KEY);
@@ -486,4 +480,20 @@ fn test_encode() {
     let input = vec![2u8, 3, 3, 3, 16, 32, 18];
     let result = encode(input, &key);
     println!("{}", result);
+}
+
+#[tokio::test]
+#[ignore = "this test requires real cookies"]
+async fn test_download_file() {
+    let old_json = std::fs::read_to_string("config.json").expect("can not read config.json");
+    let data = serde_json::from_str::<Config>(&old_json).unwrap();
+    CONFIG.store(Arc::new(data));
+    let client = CLIENT_WITH_RETRY.clone();
+    let _file = get_download_link(client, "bzh15584ul7mt8wg4".to_string())
+        .await
+        .unwrap();
+    // let mut storge_path = PathBuf::new();
+    // storge_path.push("downloads");
+    // storge_path.push(file.file_name);
+    // download_file(&file.url.url, &storge_path).await.unwrap();
 }
