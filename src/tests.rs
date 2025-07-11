@@ -3,6 +3,7 @@ use std::{collections::HashMap, fs::read_to_string, sync::Arc};
 use super::*;
 use crate::{
     cloud::download::{encode, get_download_link},
+    cloud_manager::list_files,
     config_manager::Config,
 };
 use config_manager::*;
@@ -488,12 +489,48 @@ async fn test_download_file() {
     let old_json = std::fs::read_to_string("config.json").expect("can not read config.json");
     let data = serde_json::from_str::<Config>(&old_json).unwrap();
     CONFIG.store(Arc::new(data));
-    let client = CLIENT_WITH_RETRY.clone();
-    let _file = get_download_link(client, "bzh15584ul7mt8wg4".to_string())
+    let client = ClientBuilder::new(
+        reqwest::Client::builder()
+            .user_agent(PC_UA)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap(),
+    )
+    .with(RetryTransientMiddleware::new_with_policy(
+        ExponentialBackoff::builder().build_with_max_retries(5),
+    ))
+    .build();
+    let file = get_download_link(client, "bzh15584ul7mt8wg4".to_string())
         .await
         .unwrap();
+    println!("{:?}", file);
     // let mut storge_path = PathBuf::new();
     // storge_path.push("downloads");
     // storge_path.push(file.file_name);
     // download_file(&file.url.url, &storge_path).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "this test requires real cookies"]
+async fn test_list_files() {
+    let old_json = std::fs::read_to_string("config.json").expect("can not read config.json");
+    let data = serde_json::from_str::<Config>(&old_json).unwrap();
+    CONFIG.store(Arc::new(data));
+    let client = ClientBuilder::new(
+        reqwest::Client::builder()
+            .user_agent(PC_UA)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap(),
+    )
+    .with(RetryTransientMiddleware::new_with_policy(
+        ExponentialBackoff::builder().build_with_max_retries(5),
+    ))
+    .build();
+    let response = list_files(client, "1508542093939703018", 20, 20)
+        .await
+        .unwrap();
+    println!("{:?}", response);
 }

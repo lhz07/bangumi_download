@@ -1,5 +1,7 @@
 use crate::{
-    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, config_manager::CONFIG,
+    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE,
+    cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link},
+    config_manager::CONFIG,
     login_with_qrcode::login_with_qrcode,
 };
 use anyhow::anyhow;
@@ -8,9 +10,15 @@ use regex::Regex;
 use reqwest::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, USER_AGENT,
 };
+use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{cell::Cell, collections::HashMap, path::Path};
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    error::Error,
+    path::{Path, PathBuf},
+};
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_retry::{Retry, strategy::FixedInterval};
 
@@ -31,6 +39,7 @@ pub struct Task {
     pub percent_done: i32,
     pub name: String,
     pub status: i32,
+    /// `folder_id` is the id of the folder itself or the id of the file's parent folder
     #[serde(rename = "file_id")]
     pub folder_id: String,
     #[serde(rename = "delete_file_id")]
@@ -48,6 +57,35 @@ pub struct CloudDownloadResult {
     #[serde(rename = "info_hash")]
     pub hash: Option<String>,
     pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileInfo {
+    /// `folder_id` is the id of the folder itself or the id of the file's parent folder
+    #[serde(rename = "cid")]
+    pub folder_id: String,
+    /// only file has `file_id`
+    #[serde(rename = "fid")]
+    pub file_id: Option<String>,
+    #[serde(rename = "n")]
+    pub name: String,
+    #[serde(rename = "pc")]
+    pub pick_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FileListResponse {
+    pub count: i32,
+    #[serde(rename = "data")]
+    pub files: Vec<FileInfo>,
+}
+
+#[derive(Deserialize)]
+pub struct Errors {
+    #[serde(rename = "error")]
+    pub msg: String,
+    #[serde(rename = "errNo")]
+    pub error_no: i32,
 }
 
 pub fn extract_magnet_hash(link: &str) -> Option<String> {
@@ -258,16 +296,21 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow
     Ok(current_tasks)
 }
 
-pub async fn list_files(folder_id: String) {
-    let _params = json!(
+pub async fn list_files(
+    client: ClientWithMiddleware,
+    folder_id: &str,
+    offset: i32,
+    limit: i32,
+) -> Result<FileListResponse, Box<dyn Error + Send + Sync>> {
+    let params = json!(
         {
             "aid": "1",
             "cid": folder_id,
             "o": "user_ptime",
             "asc": "0",
-            "offset": "168",
+            "offset": offset,
             "show_dir": "1",
-            "limit": "56",
+            "limit": limit,
             "code": "",
             "scid": "",
             "snap": "0",
@@ -279,4 +322,61 @@ pub async fn list_files(folder_id: String) {
             "format": "json",
         }
     );
+    let cookies = &CONFIG.load().cookies;
+    let mut headers = HeaderMap::new();
+    headers.insert(COOKIE, cookies.parse().unwrap());
+    let response = client
+        .get("https://webapi.115.com/files")
+        .headers(headers)
+        .query(&params)
+        .send()
+        .await?
+        .text()
+        .await?;
+    let result = serde_json::from_str::<FileListResponse>(&response).or_else(|e| {
+        eprintln!("list_files: can not serialize list file response, error: {e}");
+        match serde_json::from_str::<Errors>(&response) {
+            Ok(error) => {
+                eprintln!(
+                    "list_files: Error No: {}, Error message: {}",
+                    error.error_no, error.msg
+                );
+            }
+            Err(e) => eprintln!("list_files: can not get errors, error: {}", e),
+        }
+        Err("list_files: can not list files")
+    })?;
+
+    Ok(result)
+}
+
+pub async fn download_a_task(
+    folder_id: String,
+    ani_name: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let client = CLIENT_WITH_RETRY.clone();
+    let response = list_files(client.clone(), &folder_id, 0, 20).await?;
+    let file_count = response.count;
+    let mut current = response.files.len() as i32;
+    let mut files = response.files;
+    while current < file_count {
+        let mut response =
+            list_files(client.clone(), &folder_id, current, file_count - current).await?;
+        current += response.files.len() as i32;
+        files.append(&mut response.files);
+    }
+    let mut storge_path = PathBuf::new();
+    storge_path.push("downloads/115");
+    storge_path.push(&ani_name);
+    for file in files {
+        let DownloadInfo {
+            file_name,
+            url: FileDownloadUrl { url, .. },
+            ..
+        } = get_download_link(client.clone(), file.pick_code).await?;
+        let mut path = storge_path.clone();
+        path.push(&file_name);
+        download_file(&url, &path).await?;
+    }
+    Ok(())
 }

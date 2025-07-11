@@ -18,14 +18,14 @@ pub struct DownloadResponse {
     pub data: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct FileDownloadUrl {
     pub client: f64,
     pub oss_id: String,
     pub url: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct DownloadInfo {
     pub file_name: String,
     pub file_size: String,
@@ -92,16 +92,16 @@ pub async fn get_download_link(
         .await?
         .text()
         .await?;
-    println!("{}", response);
+    // println!("{}", response);
     let result = serde_json::from_str::<DownloadResponse>(&response)?;
     if result.state {
         let data_str = decode(result.data, &key)?;
         let download_data = serde_json::from_slice::<DownloadData>(&data_str)?;
-        for (i, download_info) in download_data {
-            println!(
-                "download file {}\n\tname: {}\n\turl: {}\n\tsize: {}",
-                i, download_info.file_name, download_info.url.url, download_info.file_size
-            );
+        for download_info in download_data.into_values() {
+            // println!(
+            //     "download file {}\n\tname: {}\n\turl: {}\n\tsize: {}",
+            //     i, download_info.file_name, download_info.url.url, download_info.file_size
+            // );
             return Ok(download_info);
         }
     }
