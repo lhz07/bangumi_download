@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs::read_to_string, sync::Arc};
 use super::*;
 use crate::{
     cloud::download::{encode, get_download_link},
-    cloud_manager::list_files,
+    cloud_manager::{download_a_folder, list_all_files, list_files},
     config_manager::Config,
 };
 use config_manager::*;
@@ -264,18 +264,16 @@ fn replace_vec() {
 #[test]
 fn replace_text() {
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
             "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
         "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let cmd = Box::new(|config: &mut Config| config.user.name = "master".to_string());
+    let cmd = Box::new(|config: &mut Config| config.cookies = "master".to_string());
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"master", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "master", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -533,4 +531,41 @@ async fn test_list_files() {
         .await
         .unwrap();
     println!("{:?}", response);
+}
+
+#[tokio::test]
+#[ignore = "this test requires real cookies"]
+async fn test_list_all_files() {
+    let old_json = std::fs::read_to_string("config.json").expect("can not read config.json");
+    let data = serde_json::from_str::<Config>(&old_json).unwrap();
+    CONFIG.store(Arc::new(data));
+    let client = ClientBuilder::new(
+        reqwest::Client::builder()
+            .user_agent(PC_UA)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap(),
+    )
+    .with(RetryTransientMiddleware::new_with_policy(
+        ExponentialBackoff::builder().build_with_max_retries(5),
+    ))
+    .build();
+    let response_count = list_files(client.clone(), "2775190645642362861", 0, 20)
+        .await
+        .unwrap();
+    let response = list_all_files(client, "2775190645642362861").await.unwrap();
+    println!("{:?}", response);
+    assert_eq!(response.len() as i32, response_count.count)
+}
+
+#[tokio::test]
+#[ignore = "this test requires real cookies"]
+async fn test_download_a_folder() {
+    let old_json = std::fs::read_to_string("config.json").expect("can not read config.json");
+    let data = serde_json::from_str::<Config>(&old_json).unwrap();
+    CONFIG.store(Arc::new(data));
+    download_a_folder("2775190645642362861", "test_folder")
+        .await
+        .unwrap();
 }

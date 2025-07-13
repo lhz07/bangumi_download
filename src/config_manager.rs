@@ -1,5 +1,4 @@
-use crate::alist_manager::update_alist_cookies;
-use crate::{alist_manager::get_alist_name_passwd, cloud_manager::get_cloud_cookies};
+use crate::cloud_manager::get_cloud_cookies;
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -23,33 +22,11 @@ type AniName = String;
 pub struct Config {
     pub bangumi: HashMap<BangumiID, TimeStamp>,
     pub cookies: String,
-    // this will be deprecated
-    // files_to_download: HashMap<>
     pub filter: HashMap<SubgroupID, Vec<Keyword>>,
     pub hash_ani: HashMap<Hash, AniName>,
     pub hash_ani_slow: HashMap<Hash, AniName>,
     pub magnets: HashMap<BangumiName, Vec<MagnetLink>>,
     pub rss_links: HashMap<BangumiName, RSSLink>,
-    // this will be deprecated
-    // temp: HashMap<>
-    // this will be deprecated
-    pub user: User,
-}
-
-// impl Config{
-//     pub fn get(&self) -> &Config {
-//         self
-//     }
-
-//     pub fn get_mut(&mut self) -> &mut Config {
-//         self
-//     }
-// }
-// this will be deprecated
-#[derive(Debug, Serialize, Deserialize, Default, Clone)]
-pub struct User {
-    pub name: String,
-    pub password: String,
 }
 
 pub trait Remove<T> {
@@ -88,7 +65,6 @@ impl Config {
     pub async fn initial_config() -> Result<(), anyhow::Error> {
         let path = Path::new("config.json");
         let mut old_json = String::new();
-        let mut sync_cookies = false;
         if path.exists() {
             old_json = std::fs::read_to_string(path).expect("can not read config.json");
         }
@@ -100,11 +76,9 @@ impl Config {
                 std::process::exit(1);
             })
         } else {
-            // get username and password
-            let (name, password) = get_alist_name_passwd().await;
+            // get cookies
             let cookies = get_cloud_cookies().await;
-            sync_cookies = true;
-            let default_config = serde_json::json!({"user":{"name":name, "password": password},"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}, "temp": {}, "files_to_download": {}});
+            let default_config = serde_json::json!({"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}, "temp": {}, "files_to_download": {}});
             let default_json = serde_json::to_string_pretty(&default_config).unwrap();
             std::fs::write(path, default_json).unwrap_or_else(|error| {
                 eprintln!("Can not write to path!\nError: {error}");
@@ -113,9 +87,6 @@ impl Config {
             serde_json::from_value(default_config)?
         };
         CONFIG.store(Arc::new(data));
-        if sync_cookies {
-            update_alist_cookies().await.unwrap();
-        }
         Ok(())
     }
 }
@@ -142,13 +113,4 @@ pub async fn modify_config(mut rx: mpsc::UnboundedReceiver<Message>) {
         println!("waiting for the next msg...");
     }
     println!("exit modify config");
-    // #[cfg(not(test))]
-    // {
-    //     use crate::ERROR_STATUS;
-    //     if *ERROR_STATUS.read().await {
-    //         std::process::exit(1);
-    //     } else {
-    //         std::process::exit(0);
-    //     }
-    // }
 }

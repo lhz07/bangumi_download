@@ -1,7 +1,8 @@
 use crate::{
-    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE,
+    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, TX,
     cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link},
-    config_manager::CONFIG,
+    config_manager::{CONFIG, Config, Message},
+    errors::CatError,
     login_with_qrcode::login_with_qrcode,
 };
 use anyhow::anyhow;
@@ -18,8 +19,9 @@ use std::{
     collections::HashMap,
     error::Error,
     path::{Path, PathBuf},
+    sync::Arc,
 };
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::{fs, io::AsyncWriteExt, sync::Notify};
 use tokio_retry::{Retry, strategy::FixedInterval};
 
 pub const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800323d) NetType/WIFI Language/zh_CN";
@@ -73,6 +75,11 @@ pub struct FileInfo {
     pub pick_code: String,
 }
 
+pub struct FileWithPath {
+    pub info: FileInfo,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct FileListResponse {
     pub count: i32,
@@ -94,7 +101,7 @@ pub fn extract_magnet_hash(link: &str) -> Option<String> {
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
-pub async fn get_cloud_cookies() -> String {
+pub async fn get_cloud_cookies() -> Result<String, String> {
     let try_times = Cell::new(0);
     match Retry::spawn(FixedInterval::from_millis(5000).take(5), async || {
         if try_times.get() > 0 {
@@ -105,11 +112,10 @@ pub async fn get_cloud_cookies() -> String {
     })
     .await
     {
-        Ok(cookies) => cookies,
-        Err(error) => {
-            eprintln!("Can not get cookies after retries!\nError: {error}");
-            std::process::exit(1);
-        }
+        Ok(cookies) => Ok(cookies),
+        Err(error) => Err(format!(
+            "Can not get cookies after retries!\nError: {error}"
+        )),
     }
 }
 
@@ -301,25 +307,28 @@ pub async fn list_files(
     folder_id: &str,
     offset: i32,
     limit: i32,
-) -> Result<FileListResponse, Box<dyn Error + Send + Sync>> {
+) -> Result<FileListResponse, CatError> {
     let params = json!(
         {
             "aid": "1",
             "cid": folder_id,
-            "o": "user_ptime",
-            "asc": "0",
+            // Order
+            "o": "file_name",
+            // is ascend order?
+            "asc": "1",
             "offset": offset,
             "show_dir": "1",
             "limit": limit,
             "code": "",
             "scid": "",
             "snap": "0",
-            "natsort": "1",
+            "natsort": "0",
             "record_open_time": "1",
             "count_folders": "1",
             "type": "",
             "source": "",
             "format": "json",
+            "fc_mix": "0",
         }
     );
     let cookies = &CONFIG.load().cookies;
@@ -334,27 +343,26 @@ pub async fn list_files(
         .text()
         .await?;
     let result = serde_json::from_str::<FileListResponse>(&response).or_else(|e| {
-        eprintln!("list_files: can not serialize list file response, error: {e}");
+        let mut errors = format!("list_files: can not serialize list file response, error: {e}\n");
         match serde_json::from_str::<Errors>(&response) {
             Ok(error) => {
-                eprintln!(
+                errors.push_str(&format!(
                     "list_files: Error No: {}, Error message: {}",
                     error.error_no, error.msg
-                );
+                ));
             }
-            Err(e) => eprintln!("list_files: can not get errors, error: {}", e),
+            Err(e) => errors.push_str(&format!("list_files: can not get errors, error: {}", e)),
         }
-        Err("list_files: can not list files")
+        Err(errors)
     })?;
 
     Ok(result)
 }
 
-pub async fn download_a_task(
-    folder_id: String,
-    ani_name: &str,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let client = CLIENT_WITH_RETRY.clone();
+pub async fn list_all_files(
+    client: ClientWithMiddleware,
+    folder_id: &str,
+) -> Result<Vec<FileInfo>, Box<dyn Error + Send + Sync>> {
     let response = list_files(client.clone(), &folder_id, 0, 20).await?;
     let file_count = response.count;
     let mut current = response.files.len() as i32;
@@ -365,18 +373,80 @@ pub async fn download_a_task(
         current += response.files.len() as i32;
         files.append(&mut response.files);
     }
+    Ok(files)
+}
+
+pub async fn download_a_folder(
+    folder_id: &str,
+    ani_name: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let client = CLIENT_WITH_RETRY.clone();
     let mut storge_path = PathBuf::new();
     storge_path.push("downloads/115");
     storge_path.push(&ani_name);
-    for file in files {
-        let DownloadInfo {
-            file_name,
-            url: FileDownloadUrl { url, .. },
-            ..
-        } = get_download_link(client.clone(), file.pick_code).await?;
-        let mut path = storge_path.clone();
-        path.push(&file_name);
-        download_file(&url, &path).await?;
+    let mut files = list_all_files(client.clone(), folder_id)
+        .await?
+        .into_iter()
+        .map(|info| FileWithPath {
+            info,
+            path: PathBuf::new(),
+        })
+        .collect::<Vec<_>>();
+    while let Some(file) = files.pop() {
+        match file.info.file_id {
+            Some(_) => {
+                let DownloadInfo {
+                    file_name,
+                    url: FileDownloadUrl { url, .. },
+                    ..
+                } = get_download_link(client.clone(), file.info.pick_code).await?;
+                let mut path = storge_path.clone();
+                path.push(file.path);
+                path.push(&file_name);
+                download_file(&url, &path).await?;
+            }
+            None => {
+                let mut new_files = list_all_files(client.clone(), &file.info.folder_id)
+                    .await?
+                    .into_iter()
+                    .map(|info| {
+                        let mut file_with_path = FileWithPath {
+                            info,
+                            path: PathBuf::new(),
+                        };
+                        file_with_path.path.push(&file.path);
+                        file_with_path.path.push(&file.info.name);
+                        file_with_path
+                    })
+                    .collect::<Vec<_>>();
+                files.append(&mut new_files);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn check_cookies() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let client = CLIENT_WITH_RETRY.clone();
+    match list_files(client, "0", 0, 1).await {
+        Ok(_) => {}
+        Err(e) => {
+            if let CatError::Api(_) = e {
+                println!("Cookies is expired, try to update...");
+                let cookies = get_cloud_cookies().await?;
+                let tx = TX.load().as_deref().ok_or("exiting now...")?.clone();
+                let notify = Arc::new(Notify::new());
+                let cmd = Box::new(|config: &mut Config| {
+                    config.cookies = cookies;
+                });
+                let msg = Message::new(cmd, Some(notify.clone()));
+                tx.send(msg).unwrap();
+                notify.notified().await;
+                println!("Cookies is now up to date!");
+            } else {
+                Err(e)?
+            }
+        }
     }
     Ok(())
 }

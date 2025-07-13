@@ -10,11 +10,7 @@ use tokio::{
 
 use crate::{
     END_NOTIFY, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
-    alist_manager::{
-        check_cookies, check_is_alist_working, download_a_task, get_alist_name_passwd,
-        get_alist_token,
-    },
-    cloud_manager::{del_cloud_task, get_tasks_list},
+    cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
     config_manager::{CONFIG, Config, Message, modify_config},
     update_rss::start_rss_receive,
 };
@@ -59,13 +55,6 @@ impl<'a, T: Clone> Iterator for StatusIter<'a, T> {
 }
 
 pub async fn initial() -> JoinHandle<()> {
-    match check_is_alist_working().await {
-        Ok(_) => println!("alist is working"),
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-    }
     // -------------------------------------------------------------------------
     // initial config
     if let Err(error) = Config::initial_config().await {
@@ -77,10 +66,10 @@ pub async fn initial() -> JoinHandle<()> {
     TX.swap(Some(Arc::new(tx)));
     let config_manager = tokio::spawn(modify_config(rx));
     // -------------------------------------------------------------------------
-    let username = &CONFIG.load().user.name;
-    let password = &CONFIG.load().user.password;
-    println!("{:?}", get_alist_token(&username, &password).await);
-    println!("{:?}", check_cookies().await);
+    if let Err(e) = check_cookies().await {
+        eprintln!("can not get valid cookies, error: {}", e);
+        std::process::exit(1);
+    }
     let _rss_refresh_handle = tokio::spawn(refresh_rss());
     let download_handle = tokio::spawn(refresh_download());
     let download_slow_handle = tokio::spawn(refresh_download_slow());
@@ -93,11 +82,9 @@ pub async fn initial() -> JoinHandle<()> {
 }
 
 pub async fn refresh_rss() {
-    'outer: loop {
+    loop {
         println!("\nChecking updates...\n");
         let rss_links = &CONFIG.load_full().rss_links;
-        let username = CONFIG.load().user.name.clone();
-        let password = CONFIG.load().user.password.clone();
         let urls = rss_links.values().collect::<Vec<&String>>();
         start_rss_receive(urls).await;
         println!("\nCheck finished!\n");
@@ -107,52 +94,6 @@ pub async fn refresh_rss() {
             _ = END_NOTIFY.notified() => {
                 println!("break refresh rss!");
                 break;
-            }
-        }
-        // check is alist working
-        if let Err(error) = check_is_alist_working().await {
-            eprintln!("{error}");
-            println!("Rss refresh is stopped!");
-            break;
-        }
-        // update alist token
-        if let Err(error) = get_alist_token(&username, &password).await {
-            loop {
-                eprintln!("Error occured when trying to get alist token: {}", error);
-                println!("Do you want to change alist username and password? [y/n]");
-                let mut input = String::new();
-                std::io::stdin()
-                    .read_line(&mut input)
-                    .expect("Failed to read username!");
-                let select = input.trim();
-                match select {
-                    "y" => {
-                        let (name, password) = get_alist_name_passwd().await;
-                        let tx = match TX.load().as_deref() {
-                            Some(tx) => tx.clone(),
-                            None => return,
-                        };
-                        let cmd = Box::new(|config: &mut Config| {
-                            config.user.name = name;
-                        });
-                        let msg = Message::new(cmd, None);
-                        tx.send(msg).unwrap();
-                        let cmd = Box::new(|config: &mut Config| {
-                            config.user.password = password;
-                        });
-                        let msg = Message::new(cmd, None);
-                        tx.send(msg).unwrap();
-                        break;
-                    }
-                    "n" => {
-                        println!("Rss refresh is stopped!");
-                        break 'outer;
-                    }
-                    _ => {
-                        println!("Invalid input, please type 'y' or 'n'");
-                        continue;
-                    }
-                }
             }
         }
     }
@@ -198,17 +139,9 @@ pub async fn refresh_download() {
             }
             if task.percent_done == 100 {
                 // download file
-                let file_name = &task.name;
                 let ani_name = hash_ani[task_hash].to_owned();
-                let path = format!("/115/云下载/{file_name}/{file_name}");
-                // check is alist working
-                if let Err(error) = check_is_alist_working().await {
-                    eprintln!("{error}");
-                    println!("Download refresh is stopped!");
-                    break;
-                }
                 println!("Downloading task {}", task.name);
-                if let Err(error) = download_a_task(&path, &ani_name).await {
+                if let Err(error) = download_a_folder(&task.folder_id, &ani_name).await {
                     eprintln!("Can not download a task, error: {}", error);
                     error_task
                         .entry(task_hash.to_string())
@@ -326,17 +259,9 @@ pub async fn refresh_download_slow() {
             }
             if task.percent_done == 100 {
                 // download file
-                let file_name = &task.name;
                 let ani_name = hash_ani[task_hash].clone();
-                let path = format!("/115/云下载/{file_name}/{file_name}");
-                // check is alist working
-                if let Err(error) = check_is_alist_working().await {
-                    eprintln!("{error}");
-                    println!("Download refresh is stopped!");
-                    break;
-                }
                 println!("Downloading task {}", task.name);
-                if let Err(error) = download_a_task(&path, &ani_name).await {
+                if let Err(error) = download_a_folder(&task.folder_id, &ani_name).await {
                     eprintln!("Can not download a task, error: {}", error);
                     error_task
                         .entry(task_hash.to_string())

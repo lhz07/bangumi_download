@@ -1,9 +1,9 @@
-pub mod alist_manager;
 pub mod cli_tools;
 pub mod cloud;
 pub mod cloud_manager;
 pub mod config_manager;
 pub mod crypto;
+pub mod errors;
 pub mod login_with_qrcode;
 pub mod main_proc;
 pub mod output_tools;
@@ -13,8 +13,6 @@ pub mod update_rss;
 #[cfg(test)]
 pub mod tests;
 
-use std::{sync::atomic::AtomicBool, time::Duration};
-
 use arc_swap::ArcSwapOption;
 use cloud_manager::MOBILE_UA;
 use config_manager::Message;
@@ -22,6 +20,7 @@ use once_cell::sync::Lazy;
 use reqwest::Proxy;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
+use std::{sync::atomic::AtomicBool, time::Duration};
 use tokio::{
     sync::{Mutex, Notify, Semaphore, mpsc::UnboundedSender},
     task::JoinHandle,
