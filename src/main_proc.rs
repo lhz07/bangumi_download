@@ -141,7 +141,7 @@ pub async fn refresh_download() {
                 // download file
                 let ani_name = hash_ani[task_hash].to_owned();
                 println!("Downloading task {}", task.name);
-                if let Err(error) = download_a_folder(&task.folder_id, &ani_name).await {
+                if let Err(error) = download_a_folder(&task.folder_id, Some(&ani_name)).await {
                     eprintln!("Can not download a task, error: {}", error);
                     error_task
                         .entry(task_hash.to_string())
@@ -261,7 +261,7 @@ pub async fn refresh_download_slow() {
                 // download file
                 let ani_name = hash_ani[task_hash].clone();
                 println!("Downloading task {}", task.name);
-                if let Err(error) = download_a_folder(&task.folder_id, &ani_name).await {
+                if let Err(error) = download_a_folder(&task.folder_id, Some(&ani_name)).await {
                     eprintln!("Can not download a task, error: {}", error);
                     error_task
                         .entry(task_hash.to_string())

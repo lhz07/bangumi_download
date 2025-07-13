@@ -28,7 +28,7 @@ async fn main() -> ExitCode {
                 stream.write_str("keep-alive").await.unwrap();
                 loop {
                     println!(
-                        "\n请输入想要执行的操作: \n1.添加RSS链接\n2.删除RSS链接\n3.添加字幕组过滤器\n4.删除字幕组过滤器\n5.添加单个磁链下载\n6.退出程序\n"
+                        "\n请输入想要执行的操作: \n1.添加RSS链接\n2.删除RSS链接\n3.添加字幕组过滤器\n4.删除字幕组过滤器\n5.添加单个磁链下载\n6.下载文件夹\n7.退出程序\n"
                     );
                     let mut input = String::new();
                     std::io::stdin().read_line(&mut input).unwrap();
@@ -39,7 +39,8 @@ async fn main() -> ExitCode {
                         "3" => Cli::add_subgroup_filter(&mut stream).await,
                         "4" => Cli::del_subgroup_filter(&mut stream).await,
                         "5" => Cli::add_single_magnet_download(&mut stream).await,
-                        "6" => {
+                        "6" => Cli::download_a_folder(&mut stream).await,
+                        "7" => {
                             println!("正在退出...");
                             break;
                         }

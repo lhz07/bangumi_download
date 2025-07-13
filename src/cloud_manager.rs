@@ -6,22 +6,26 @@ use crate::{
     login_with_qrcode::login_with_qrcode,
 };
 use anyhow::anyhow;
+use futures::future::join_all;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use reqwest::header::{
-    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, USER_AGENT,
+use reqwest::{
+    Client,
+    header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, USER_AGENT},
 };
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::fs as sfs;
 use std::{
     cell::Cell,
     collections::HashMap,
     error::Error,
+    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{fs, io::AsyncWriteExt, sync::Notify};
+use tokio::{fs, sync::Notify};
 use tokio_retry::{Retry, strategy::FixedInterval};
 
 pub const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800323d) NetType/WIFI Language/zh_CN";
@@ -75,6 +79,12 @@ pub struct FileInfo {
     pub pick_code: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FileInfoResponse {
+    #[serde(rename = "file_name")]
+    pub name: String,
+}
+
 pub struct FileWithPath {
     pub info: FileInfo,
     pub path: PathBuf,
@@ -119,27 +129,69 @@ pub async fn get_cloud_cookies() -> Result<String, String> {
     }
 }
 
-pub async fn download_file(url: &str, path: &Path) -> Result<(), anyhow::Error> {
+async fn download_chunk(
+    url: &str,
+    client: Client,
+    start: u64,
+    end: u64,
+    file: Arc<sfs::File>,
+    progress: Arc<ProgressBar>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let range_header = format!("bytes={}-{}", start, end);
+    let mut response = client.get(url).header("Range", range_header).send().await?;
+    let mut current: u64 = start;
+    while let Some(chunk) = response.chunk().await? {
+        file.write_all_at(&chunk, current)?;
+        let delta = chunk.len() as u64;
+        progress.inc(delta);
+        current += delta;
+    }
+    Ok(())
+}
+
+pub async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     let client = CLIENT_DOWNLOAD.clone();
-    let mut response = client.get(url).send().await?;
+    let response = client.head(url).send().await?;
     let content_length = response
         .headers()
         .get(CONTENT_LENGTH)
-        .ok_or_else(|| anyhow::Error::msg("Can not download"))?
+        .ok_or("Can not download")?
         .to_str()?
         .parse::<u64>()?;
-    let progress = ProgressBar::new(content_length);
+    let average = content_length / 2;
+    println!("{} {}", content_length, average);
+    let progress = Arc::new(ProgressBar::new(content_length));
     progress.set_style(
         ProgressStyle::default_bar()
-            .template("{wide_bar} {bytes} / {total_bytes} ({binary_bytes_per_sec}  eta: {eta})")?,
+            .template("{wide_bar} {bytes} / {total_bytes} ({binary_bytes_per_sec}  eta: {eta})")
+            .unwrap(),
     );
+    let mut futs = Vec::new();
+    let mut current: u64 = 0;
     fs::create_dir_all(path.parent().unwrap()).await?;
-    let mut file = fs::File::create(path).await?;
-    while let Some(data) = response.chunk().await? {
-        file.write_all(&data).await?;
-        progress.inc(data.len() as u64);
-    }
+    let file = Arc::new(sfs::File::create(path)?);
+    futs.push(download_chunk(
+        url,
+        client.clone(),
+        current,
+        current + average,
+        file.clone(),
+        progress.clone(),
+    ));
+    current += average;
+    futs.push(download_chunk(
+        url,
+        client.clone(),
+        current,
+        content_length,
+        file.clone(),
+        progress.clone(),
+    ));
+    let results = join_all(futs).await;
     progress.finish();
+    for i in results {
+        i?;
+    }
     println!("finished!");
     Ok(())
 }
@@ -378,12 +430,18 @@ pub async fn list_all_files(
 
 pub async fn download_a_folder(
     folder_id: &str,
-    ani_name: &str,
+    ani_name: Option<&str>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let client = CLIENT_WITH_RETRY.clone();
     let mut storge_path = PathBuf::new();
     storge_path.push("downloads/115");
-    storge_path.push(&ani_name);
+    match ani_name {
+        Some(name) => storge_path.push(name),
+        None => {
+            let result = get_file_info(client.clone(), folder_id).await?;
+            storge_path.push(result.name);
+        }
+    }
     let mut files = list_all_files(client.clone(), folder_id)
         .await?
         .into_iter()
@@ -449,4 +507,39 @@ pub async fn check_cookies() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     Ok(())
+}
+
+pub async fn get_file_info(
+    client: ClientWithMiddleware,
+    folder_id: &str,
+) -> Result<FileInfoResponse, CatError> {
+    let params = json!({
+        "cid": folder_id
+    });
+    let cookies = &CONFIG.load().cookies;
+    let mut headers = HeaderMap::new();
+    headers.insert(COOKIE, cookies.parse().unwrap());
+    let response = client
+        .get("https://webapi.115.com/category/get")
+        .headers(headers)
+        .query(&params)
+        .send()
+        .await?
+        .text()
+        .await?;
+    let result = serde_json::from_str::<FileInfoResponse>(&response).or_else(|e| {
+        let mut errors =
+            format!("get file info: can not serialize list file response, error: {e}\n");
+        match serde_json::from_str::<Errors>(&response) {
+            Ok(error) => {
+                errors.push_str(&format!(
+                    "get file info: Error No: {}, Error message: {}",
+                    error.error_no, error.msg
+                ));
+            }
+            Err(e) => errors.push_str(&format!("get file info: can not get errors, error: {}", e)),
+        }
+        Err(errors)
+    })?;
+    Ok(result)
 }

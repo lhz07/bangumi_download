@@ -10,6 +10,9 @@ use tokio::{
     net::UnixListener,
 };
 
+use crate::cli_tools::{ADD_LINK, DOWNLOAD_FOLDER};
+use crate::cloud_manager::download_a_folder;
+
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
     fn try_connect(&self) -> SocketState;
@@ -204,7 +207,7 @@ impl SocketStreamHandle for SocketStream {
             let content = stream.read_str().await.unwrap();
             match content.as_str() {
                 // implement add link
-                "add-link" => {
+                ADD_LINK => {
                     let rss_link = stream.read_str().await.unwrap();
                     let client = CLIENT_WITH_RETRY.clone();
                     match check_rss_link(&rss_link, client).await {
@@ -231,6 +234,13 @@ impl SocketStreamHandle for SocketStream {
                     //     .write_str("Sorry😢, please try again later")
                     //     .await
                     //     .unwrap();
+                    stream.write_str("\0").await.unwrap();
+                }
+                DOWNLOAD_FOLDER => {
+                    let cid = stream.read_str().await.unwrap();
+                    if let Err(e) = download_a_folder(&cid, None).await {
+                        stream.write_str(&e.to_string()).await.unwrap();
+                    }
                     stream.write_str("\0").await.unwrap();
                 }
                 "" => (),

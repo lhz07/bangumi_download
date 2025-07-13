@@ -18,6 +18,9 @@ pub enum Command {
     DelLink,
 }
 
+pub const ADD_LINK: &str = "add-link";
+pub const DOWNLOAD_FOLDER: &str = "download-folder";
+
 pub struct Cli;
 
 impl Cli {
@@ -35,15 +38,27 @@ impl Cli {
             println!("RSS链接不能为空");
             return;
         }
-        stream.write_str("add-link").await.unwrap();
+        stream.write_str(ADD_LINK).await.unwrap();
         stream.write_str(rss_link).await.unwrap();
         stream.read_str_to_end().await.unwrap();
-        // println!("stream: {}", stream.read_str().await.unwrap());
     }
     pub async fn del_a_link(_stream: &mut SocketStream) {}
     pub async fn add_subgroup_filter(_stream: &mut SocketStream) {}
     pub async fn del_subgroup_filter(_stream: &mut SocketStream) {}
     pub async fn add_single_magnet_download(_stream: &mut SocketStream) {}
+    pub async fn download_a_folder(stream: &mut SocketStream) {
+        let mut input = String::new();
+        println!("请输入要下载的文件夹cid:");
+        std::io::stdin().read_line(&mut input).unwrap();
+        let cid = input.trim();
+        if cid.is_empty() {
+            println!("cid不能为空");
+            return;
+        }
+        stream.write_str(DOWNLOAD_FOLDER).await.unwrap();
+        stream.write_str(cid).await.unwrap();
+        stream.read_str_to_end().await.unwrap();
+    }
 
     pub async fn update(stream: &mut SocketStream) {
         stream.write_str("Update!").await.unwrap();

@@ -1,9 +1,9 @@
-use std::{collections::HashMap, fs::read_to_string, sync::Arc};
+use std::{collections::HashMap, fs::read_to_string, path::Path, sync::Arc};
 
 use super::*;
 use crate::{
     cloud::download::{encode, get_download_link},
-    cloud_manager::{download_a_folder, list_all_files, list_files},
+    cloud_manager::{download_a_folder, download_file, get_file_info, list_all_files, list_files},
     config_manager::Config,
 };
 use config_manager::*;
@@ -551,7 +551,40 @@ async fn test_download_a_folder() {
     let old_json = std::fs::read_to_string("config.json").expect("can not read config.json");
     let data = serde_json::from_str::<Config>(&old_json).unwrap();
     CONFIG.store(Arc::new(data));
-    download_a_folder("2775190645642362861", "test_folder")
+    download_a_folder("2775190645642362861", Some("test_folder"))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "this test requires real cookies"]
+async fn test_get_file_info() {
+    let old_json = std::fs::read_to_string("config.json").expect("can not read config.json");
+    let data = serde_json::from_str::<Config>(&old_json).unwrap();
+    CONFIG.store(Arc::new(data));
+    let client = ClientBuilder::new(
+        reqwest::Client::builder()
+            .user_agent(PC_UA)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap(),
+    )
+    .with(RetryTransientMiddleware::new_with_policy(
+        ExponentialBackoff::builder().build_with_max_retries(5),
+    ))
+    .build();
+    let result = get_file_info(client, "2775190645642362861").await.unwrap();
+    println!("{:?}", result);
+}
+
+#[tokio::test]
+#[ignore = "this test is slow"]
+async fn test_multi_thread_download() {
+    download_file(
+        "https://dldir1v6.qq.com/qqfile/qq/QQNT/Mac/QQ_6.9.75_250710_01.dmg",
+        Path::new("downloads/qq"),
+    )
+    .await
+    .unwrap();
 }
