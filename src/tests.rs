@@ -190,8 +190,7 @@ async fn config_test() {
     use config_manager::CONFIG;
     use std::sync::Arc;
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -214,8 +213,7 @@ async fn config_test() {
     });
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], "610": ["简日", "简体"], "587": ["CHS"],
@@ -234,8 +232,7 @@ async fn config_test() {
 #[test]
 fn replace_vec() {
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -246,8 +243,7 @@ fn replace_vec() {
     });
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -287,8 +283,7 @@ fn replace_text() {
 #[test]
 fn append_vec_to_vec() {
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -303,8 +298,7 @@ fn append_vec_to_vec() {
     });
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封", "简日内嵌", "CHS"], "583": ["CHT"], "570": ["内封"], 
@@ -318,8 +312,7 @@ fn append_vec_to_vec() {
 #[test]
 fn append_map() {
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -337,8 +330,7 @@ fn append_map() {
     });
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], "610": ["简日", "简体"], "587": ["CHS"],
@@ -352,8 +344,7 @@ fn append_map() {
 #[test]
 fn append_text_to_vec() {
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -368,8 +359,7 @@ fn append_text_to_vec() {
     });
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封", "简日内嵌"], "583": ["CHT"], "570": ["内封"], 
@@ -383,8 +373,7 @@ fn append_text_to_vec() {
 #[test]
 fn del_key() {
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], "233": ["繁体"],
@@ -395,8 +384,7 @@ fn del_key() {
     });
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
@@ -410,8 +398,7 @@ fn del_key() {
 #[test]
 fn del_value() {
     let origin = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"],
@@ -426,8 +413,7 @@ fn del_value() {
     });
     let msg = Message::new(cmd, None);
     let expect_result = serde_json::json!(
-        {"user":{"name":"", "password": ""},
-        "bangumi":{}, "cookies": "", 
+        {"bangumi":{}, "cookies": "", 
         "rss_links": {}, 
         "filter": {
             "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
