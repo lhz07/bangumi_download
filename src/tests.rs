@@ -102,11 +102,13 @@ fn test_extract_magnet_hash() {
     let magnet_links = [
         "magnet:?xt=urn:btih:40882fa906a4fe9da7b57fa53a7bd880ad3244ce&tr=http%3a%2f%2ft.nyaatracker.com%2fannounce&tr=http%3a%2f%2ftracker.kamigami.org%3a2710%2fannounce&tr=http%3a%2f%2fshare.camoe.cn%3a8080%2fannounce&tr=http%3a%2f%2fopentracker.acgnx.se%2fannounce&tr=http%3a%2f%2fanidex.moe%3a6969%2fannounce&tr=http%3a%2f%2ft.acg.rip%3a6699%2fannounce&tr=https%3a%2f%2ftr.bangumi.moe%3a9696%2fannounce&tr=udp%3a%2f%2ftr.bangumi.moe%3a6969%2fannounce&tr=http%3a%2f%2fopen.acgtracker.com%3a1096%2fannounce&tr=udp%3a%2f%2ftracker.opentrackr.org%3a1337%2fannounce",
         "magnet:?xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUV234567ABCD&tr=http%3a%2f%2ft.nyaatracker.com%2fannounce",
+        "magnet:?dn=test&xt=urn:btih:ABCDEFGHIJKLMNOPQRSTUVWXYZ234567&tr=udp://...",
         "magnet:?xt=urn:btih:INVALIDHASH",
     ];
     let results = [
         Some("40882fa906a4fe9da7b57fa53a7bd880ad3244ce".to_string()),
         Some("ABCDEFGHIJKLMNOPQRSTUV234567ABCD".to_string()),
+        Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".to_string()),
         None,
     ];
     for (i, link) in magnet_links.iter().enumerate() {

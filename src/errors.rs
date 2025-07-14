@@ -1,3 +1,4 @@
+use reqwest::header::InvalidHeaderValue;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -6,6 +7,8 @@ pub enum CatError {
     Request(#[from] RequestError),
     #[error("Api error: {0}")]
     Api(String),
+    #[error("Cookies error: {0}")]
+    Cookies(#[from] InvalidHeaderValue),
 }
 
 impl From<String> for CatError {

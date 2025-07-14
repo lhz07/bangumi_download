@@ -54,11 +54,11 @@ impl<'a, T: Clone> Iterator for StatusIter<'a, T> {
     }
 }
 
-pub async fn initial() -> JoinHandle<()> {
+pub async fn initialize() -> JoinHandle<()> {
     // -------------------------------------------------------------------------
     // initial config
     if let Err(error) = Config::initial_config().await {
-        eprintln!("can not initial config, error: {error}");
+        eprintln!("can not initialize config\n{error}");
         std::process::exit(1);
     }
     // launch config write thread

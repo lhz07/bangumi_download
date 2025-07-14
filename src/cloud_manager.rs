@@ -11,12 +11,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use reqwest::{
     Client,
-    header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, USER_AGENT},
+    header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue},
 };
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::fs as sfs;
 use std::{
     cell::Cell,
     collections::HashMap,
@@ -25,6 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use std::{fs as sfs, str::FromStr};
 use tokio::{fs, sync::Notify};
 use tokio_retry::{Retry, strategy::FixedInterval};
 
@@ -106,7 +106,8 @@ pub struct Errors {
 }
 
 pub fn extract_magnet_hash(link: &str) -> Option<String> {
-    let re = Regex::new(r"magnet:\?xt=urn:btih:([0-9a-fA-F]{40}|[A-Z2-7]{32})").unwrap();
+    let re =
+        Regex::new(r"xt=urn:btih:([a-fA-F0-9]{40}|[A-Z2-7]{32})").expect("regex should be valid!");
     re.captures(link)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
@@ -134,8 +135,8 @@ async fn download_chunk(
     client: Client,
     start: u64,
     end: u64,
-    file: Arc<sfs::File>,
-    progress: Arc<ProgressBar>,
+    file: &sfs::File,
+    progress: &ProgressBar,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let range_header = format!("bytes={}-{}", start, end);
     let mut response = client.get(url).header("Range", range_header).send().await?;
@@ -160,23 +161,23 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn Error +
         .parse::<u64>()?;
     let average = content_length / 2;
     println!("{} {}", content_length, average);
-    let progress = Arc::new(ProgressBar::new(content_length));
+    let progress = ProgressBar::new(content_length);
     progress.set_style(
         ProgressStyle::default_bar()
             .template("{wide_bar} {bytes} / {total_bytes} ({binary_bytes_per_sec}  eta: {eta})")
-            .unwrap(),
+            .expect("progress style should be valid!"),
     );
-    let mut futs = Vec::new();
     let mut current: u64 = 0;
-    fs::create_dir_all(path.parent().unwrap()).await?;
-    let file = Arc::new(sfs::File::create(path)?);
+    fs::create_dir_all(path.parent().ok_or("path's parent folder is missing")?).await?;
+    let file = sfs::File::create(path)?;
+    let mut futs = Vec::new();
     futs.push(download_chunk(
         url,
         client.clone(),
         current,
         current + average,
-        file.clone(),
-        progress.clone(),
+        &file,
+        &progress,
     ));
     current += average;
     futs.push(download_chunk(
@@ -184,8 +185,8 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn Error +
         client.clone(),
         current,
         content_length,
-        file.clone(),
-        progress.clone(),
+        &file,
+        &progress,
     ));
     let results = join_all(futs).await;
     progress.finish();
@@ -196,17 +197,18 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn Error +
     Ok(())
 }
 
-pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, anyhow::Error> {
+pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
     let client = CLIENT_WITH_RETRY_MOBILE.clone();
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
-    headers.insert(HOST, "115.com".parse().unwrap());
-    headers.insert(CONNECTION, "keep-alive".parse().unwrap());
-    headers.insert(
-        CONTENT_TYPE,
-        "application/x-www-form-urlencoded".parse().unwrap(),
-    );
-    headers.insert(COOKIE, cookies.parse().unwrap());
+    let insert_headers = |map: &mut HeaderMap| -> Result<(), <HeaderValue as FromStr>::Err> {
+        map.insert(HOST, "115.com".parse()?);
+        map.insert(CONNECTION, "keep-alive".parse()?);
+        map.insert(CONTENT_TYPE, "application/x-www-form-urlencoded".parse()?);
+        Ok(())
+    };
+    insert_headers(&mut headers).expect("headers should be valid!");
+    headers.insert(COOKIE, cookies.parse()?);
     let params = serde_json::json!({
         "ct": "lixian",
         "ac": "add_task_urls",
@@ -229,26 +231,25 @@ pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, anyhow::Erro
     let result = download_result
         .into_iter()
         .map(|i| match i.hash {
-            Some(hash) => hash,
-            None => extract_magnet_hash(&i.url).unwrap(),
+            Some(hash) => Ok(hash),
+            None => extract_magnet_hash(&i.url).ok_or("invalid magnet link"),
         })
-        .collect();
+        .collect::<Result<Vec<String>, &str>>()?;
     Ok(result)
 }
 
-pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
+pub async fn del_cloud_task(hash: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let client = CLIENT_WITH_RETRY.clone();
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
-    headers.insert(HOST, "115.com".parse().unwrap());
-    headers.insert(CONNECTION, "keep-alive".parse().unwrap());
-    headers.insert(
-        CONTENT_TYPE,
-        "application/x-www-form-urlencoded; charset=UTF-8"
-            .parse()
-            .unwrap(),
-    );
-    headers.insert(COOKIE, cookies.parse().unwrap());
+    let insert_headers = |map: &mut HeaderMap| -> Result<(), <HeaderValue as FromStr>::Err> {
+        map.insert(HOST, "115.com".parse()?);
+        map.insert(CONNECTION, "keep-alive".parse()?);
+        map.insert(CONTENT_TYPE, "application/x-www-form-urlencoded".parse()?);
+        Ok(())
+    };
+    insert_headers(&mut headers).expect("headers should be valid!");
+    headers.insert(COOKIE, cookies.parse()?);
     let params = serde_json::json!({
         "ct": "lixian",
         "ac": "task_del",
@@ -256,13 +257,9 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
     let uid = cookies
         .split(";")
         .next()
-        .unwrap()
-        .split("=")
-        .nth(1)
-        .unwrap()
-        .split("_")
-        .next()
-        .unwrap();
+        .and_then(|s| s.split("=").nth(1))
+        .and_then(|s| s.split("_").next())
+        .ok_or("invalid cookies!")?;
     let data = serde_json::json!({
         "hash[0]": hash,
         "uid": uid,
@@ -280,20 +277,21 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), anyhow::Error> {
     if response_json["state"] == true {
         Ok(())
     } else {
-        Err(anyhow::anyhow!(response))
+        Err(response.into())
     }
 }
 
 pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow::Error> {
-    // let client = CLIENT_WITH_RETRY.clone();
-    let client = CLIENT_WITH_RETRY_MOBILE.clone();
-    // let client = CLIENT_PROXY.clone();
+    let client = CLIENT_WITH_RETRY.clone();
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
-    headers.insert(HOST, "115.com".parse().unwrap());
-    headers.insert(CONNECTION, "keep-alive".parse().unwrap());
-    headers.insert(COOKIE, cookies.parse().unwrap());
-    headers.insert(USER_AGENT, MOBILE_UA.parse().unwrap());
+    let insert_headers = |map: &mut HeaderMap| -> Result<(), <HeaderValue as FromStr>::Err> {
+        map.insert(HOST, "115.com".parse()?);
+        map.insert(CONNECTION, "keep-alive".parse()?);
+        Ok(())
+    };
+    insert_headers(&mut headers).expect("headers should be valid!");
+    headers.insert(COOKIE, cookies.parse()?);
     let mut params = serde_json::json!({
         "ct": "lixian",
         "ac": "task_lists",
@@ -385,7 +383,7 @@ pub async fn list_files(
     );
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
-    headers.insert(COOKIE, cookies.parse().unwrap());
+    headers.insert(COOKIE, cookies.parse()?);
     let response = client
         .get("https://webapi.115.com/files")
         .headers(headers)
@@ -498,7 +496,7 @@ pub async fn check_cookies() -> Result<(), Box<dyn Error + Send + Sync>> {
                     config.cookies = cookies;
                 });
                 let msg = Message::new(cmd, Some(notify.clone()));
-                tx.send(msg).unwrap();
+                tx.send(msg)?;
                 notify.notified().await;
                 println!("Cookies is now up to date!");
             } else {
@@ -518,7 +516,7 @@ pub async fn get_file_info(
     });
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
-    headers.insert(COOKIE, cookies.parse().unwrap());
+    headers.insert(COOKIE, cookies.parse()?);
     let response = client
         .get("https://webapi.115.com/category/get")
         .headers(headers)

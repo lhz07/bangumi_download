@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use bangumi_download::{
     END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
     cli_tools::{Args, Cli, Command},
-    main_proc::initial,
+    main_proc::initialize,
     socket_utils::{SocketPath, SocketState, SocketStateDetect},
 };
 use clap::Parser;
@@ -50,7 +50,7 @@ async fn main() -> ExitCode {
             }
         }
     } else {
-        let config_manager = initial().await;
+        let config_manager = initialize().await;
         let listener = socket_path.to_listener().unwrap();
         ctrlc::set_handler(|| {
             if EXIT_NOW.load(std::sync::atomic::Ordering::Relaxed) {

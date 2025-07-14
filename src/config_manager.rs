@@ -2,9 +2,9 @@ use crate::cloud_manager::get_cloud_cookies;
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::{collections::HashMap, error::Error};
 use tokio::sync::{Notify, mpsc};
 
 pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::new(Arc::new(Config::new())));
@@ -62,29 +62,27 @@ impl Config {
         data
     }
 
-    pub async fn initial_config() -> Result<(), anyhow::Error> {
+    pub async fn initial_config() -> Result<(), Box<dyn Error + Send + Sync>> {
         let path = Path::new("config.json");
         let mut old_json = String::new();
         if path.exists() {
             old_json = std::fs::read_to_string(path).expect("can not read config.json");
         }
         let data = if path.exists() && !old_json.is_empty() {
-            serde_json::from_str::<Config>(&old_json).unwrap_or_else(|error| {
-                eprintln!(
+            serde_json::from_str::<Config>(&old_json).or_else(|error| {
+                Err(format!(
                     "Invalid json format, you may try empty or delete config.json\nError: {error}"
-                );
-                std::process::exit(1);
-            })
+                ))
+            })?
         } else {
             // get cookies
             let cookies = get_cloud_cookies().await;
             let default_config = serde_json::json!({"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}, "temp": {}, "files_to_download": {}});
-            let default_json = serde_json::to_string_pretty(&default_config).unwrap();
-            std::fs::write(path, default_json).unwrap_or_else(|error| {
-                eprintln!("Can not write to path!\nError: {error}");
-                std::process::exit(1);
-            });
-            serde_json::from_value(default_config)?
+            let default_json = serde_json::to_string_pretty(&default_config)
+                .expect("default config should be valid!");
+            std::fs::write(path, default_json)
+                .or_else(|error| Err(format!("Can not write to path!\nError: {error}")))?;
+            serde_json::from_value(default_config).expect("default config should be valid!")
         };
         CONFIG.store(Arc::new(data));
         Ok(())
@@ -99,8 +97,8 @@ pub async fn modify_config(mut rx: mpsc::UnboundedReceiver<Message>) {
         #[cfg(not(test))]
         {
             use tokio::fs;
-            let config_str =
-                serde_json::to_string_pretty(&new_config).expect("can not serialize new config");
+            let config_str = serde_json::to_string_pretty(&new_config)
+                .expect("Config should be a valid struct!");
             fs::write("config.json", config_str)
                 .await
                 .expect("can not write new config");

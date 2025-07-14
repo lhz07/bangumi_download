@@ -12,6 +12,7 @@ use scraper::{Element, Html, Selector};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
+    error::Error,
     sync::{Arc, atomic::AtomicI32},
 };
 use tokio::sync::{Notify, mpsc};
@@ -168,7 +169,8 @@ pub async fn get_all_episode_magnet_links(
         }
     };
     let soup = Html::parse_document(&response);
-    let selector = Selector::parse("a.magnet-link-wrap").unwrap();
+    let selector =
+        Selector::parse("a.magnet-link-wrap").expect("html element selector must be valid!");
     let elements = soup.select(&selector);
     let mut items = Vec::<LItem>::new();
     for element in elements {
@@ -197,7 +199,8 @@ async fn get_subgroup_name(url: &str, client: ClientWithMiddleware) -> Option<St
         }
     };
     let resource = Html::parse_document(&response);
-    let selector = Selector::parse("a.magnet-link-wrap").unwrap();
+    let selector =
+        Selector::parse("a.magnet-link-wrap").expect("html element selector must be valid!");
     let sub_name = resource.select(&selector).next()?.text().next()?;
     Some(sub_name.to_string())
 }
@@ -243,7 +246,7 @@ pub async fn get_a_magnet_link(url: &str, client: ClientWithMiddleware) -> Optio
     };
     println!("got the response!");
     let resource = Html::parse_document(&response);
-    let selector = Selector::parse("a[href]").unwrap();
+    let selector = Selector::parse("a[href]").expect("html element selector must be valid!");
     let magnet_link = resource
         .select(&selector)
         .filter_map(|element| element.value().attr("href"))
@@ -253,7 +256,7 @@ pub async fn get_a_magnet_link(url: &str, client: ClientWithMiddleware) -> Optio
 }
 
 pub async fn check_rss_link(url: &str, client: ClientWithMiddleware) -> Result<(), String> {
-    let pattern = Regex::new(r"^https?://mikanime\.tv/RSS/Bangumi\?(bangumiId=\d+&subgroupid=\d+|subgroupid=\d+&bangumiId=\d+)$").unwrap();
+    let pattern = Regex::new(r"^https?://mikanime\.tv/RSS/Bangumi\?(bangumiId=\d+&subgroupid=\d+|subgroupid=\d+&bangumiId=\d+)$").expect("regex should be valid!");
     if let None = pattern.captures(url) {
         return Err("Invalid url!".into());
     }
@@ -272,7 +275,7 @@ pub async fn rss_receive(
     url: &str,
     old_config: &Config,
     client: ClientWithMiddleware,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let response = client.get(url).send().await?.text().await?;
     let rss = de::from_str::<RSS>(&response)?;
     let channel = rss.channel;
@@ -280,29 +283,24 @@ pub async fn rss_receive(
     let latest_item = items
         .first()
         .ok_or_else(|| anyhow::Error::msg("can not found latest item!"))?;
-    let mut split_ani_sub = channel
-        .link
-        .split("bangumiId=")
-        .nth(1)
-        .unwrap_or_default()
-        .split("&subgroupid=");
-    let ani_id = split_ani_sub
-        .next()
-        .ok_or_else(|| anyhow::Error::msg("can not found ani_id!"))?
-        .to_string();
-    let sub_id = split_ani_sub
-        .next()
-        .ok_or_else(|| anyhow::Error::msg("can not found sub_id!"))?
-        .to_string();
-    let sub_name = get_subgroup_name(&latest_item.link, client)
-        .await
-        .unwrap_or_default();
-    let bangumi_name = channel
-        .title
-        .split(" - ")
-        .nth(1)
-        .unwrap_or(&channel.title)
-        .to_string();
+    let parse_link = async || -> Option<(String, String, String, String)> {
+        let mut split_ani_sub = channel
+            .link
+            .split("bangumiId=")
+            .nth(1)?
+            .split("&subgroupid=");
+        let ani_id = split_ani_sub.next()?.to_string();
+        let sub_id = split_ani_sub.next()?.to_string();
+        let sub_name = get_subgroup_name(&latest_item.link, client).await?;
+        let bangumi_name = channel
+            .title
+            .split(" - ")
+            .nth(1)
+            .unwrap_or(&channel.title)
+            .to_string();
+        Some((ani_id, sub_id, sub_name, bangumi_name))
+    };
+    let (ani_id, sub_id, sub_name, bangumi_name) = parse_link().await.ok_or("")?;
     let title = format!("[{sub_name}] {bangumi_name}");
     let latest_update = latest_item.torrent.pub_date.clone();
     let bangumi_id = format!("{ani_id}&{sub_id}");
@@ -349,7 +347,7 @@ pub async fn rss_receive(
                 eprintln!("Error: {:?}", error);
                 ERROR_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
                 drop(TX.swap(None));
-                return Err(anyhow::anyhow!("Can not get magnet links!"));
+                return Err("Can not get magnet links!".into());
             }
         };
         let insert_key = format!("{ani_id}&{sub_id}");
@@ -378,13 +376,13 @@ pub async fn rss_receive(
                     config.magnets.remove(&title);
                 });
                 let msg = Message::new(cmd, None);
-                tx.send(msg).unwrap();
+                tx.send(msg)?;
                 let notify = Arc::new(Notify::new());
                 let cmd = Box::new(|config: &mut Config| {
                     config.hash_ani.extend(hash_ani.into_iter());
                 });
                 let msg = Message::new(cmd, Some(notify.clone()));
-                tx.send(msg).expect("can not send to config thread!");
+                tx.send(msg)?;
                 notify.notified().await;
                 println!("restart refresh download in rss receive");
                 restart_refresh_download().await;
@@ -400,10 +398,10 @@ pub async fn rss_receive(
                         .or_insert(magnet_links);
                 });
                 let msg = Message::new(cmd, None);
-                tx.send(msg).expect("can not send to config thread!");
+                tx.send(msg)?;
                 ERROR_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
                 drop(TX.swap(None));
-                return Err(anyhow::anyhow!("Can not add magnet to cloud!"));
+                return Err("Can not add magnet to cloud!".into());
             }
         }
     }
