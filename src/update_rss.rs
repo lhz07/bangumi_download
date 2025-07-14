@@ -1,7 +1,7 @@
 use crate::{
     CLIENT_WITH_RETRY, ERROR_STATUS, TX,
     cloud_manager::cloud_download,
-    config_manager::{CONFIG, Config, Message},
+    config_manager::{CONFIG, Config, Message, SafeSend},
     main_proc::restart_refresh_download,
 };
 use futures::future::{self, join_all};
@@ -314,7 +314,7 @@ pub async fn rss_receive(
             config.bangumi.insert(insert_key, latest_update);
         });
         let msg = Message::new(cmd, None);
-        tx.send(msg)?;
+        tx.send_msg(msg);
         if let Some(links) =
             get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await
         {
@@ -326,7 +326,7 @@ pub async fn rss_receive(
             config.rss_links.insert(insert_title, insert_url);
         });
         let msg = Message::new(cmd, None);
-        tx.send(msg)?;
+        tx.send_msg(msg);
     } else if latest_update == old_bangumi_dict[&bangumi_id] {
         println!("{title} 无更新, 上次更新: {latest_update}");
     } else {
@@ -355,7 +355,7 @@ pub async fn rss_receive(
             config.bangumi.insert(insert_key, latest_update);
         });
         let msg = Message::new(cmd, None);
-        tx.send(msg)?;
+        tx.send_msg(msg);
     }
     if let Some(magnets) = old_config.magnets.get(&title) {
         magnet_links.append(&mut magnets.iter().map(|i| i.clone()).collect::<Vec<_>>());
@@ -376,13 +376,13 @@ pub async fn rss_receive(
                     config.magnets.remove(&title);
                 });
                 let msg = Message::new(cmd, None);
-                tx.send(msg)?;
+                tx.send_msg(msg);
                 let notify = Arc::new(Notify::new());
                 let cmd = Box::new(|config: &mut Config| {
                     config.hash_ani.extend(hash_ani.into_iter());
                 });
                 let msg = Message::new(cmd, Some(notify.clone()));
-                tx.send(msg)?;
+                tx.send_msg(msg);
                 notify.notified().await;
                 println!("restart refresh download in rss receive");
                 restart_refresh_download().await;
@@ -398,7 +398,7 @@ pub async fn rss_receive(
                         .or_insert(magnet_links);
                 });
                 let msg = Message::new(cmd, None);
-                tx.send(msg)?;
+                tx.send_msg(msg);
                 ERROR_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
                 drop(TX.swap(None));
                 return Err("Can not add magnet to cloud!".into());

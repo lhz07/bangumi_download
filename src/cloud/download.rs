@@ -1,8 +1,9 @@
-use std::{collections::HashMap, error::Error, time::UNIX_EPOCH};
+use std::{collections::HashMap, time::UNIX_EPOCH};
 
 use crate::{
     config_manager::CONFIG,
     crypto::{rsa, xor},
+    errors::CloudError,
 };
 use base64::{DecodeError, Engine, engine::general_purpose};
 use rand::{self, Rng};
@@ -62,7 +63,7 @@ pub fn decode(input: String, key: &[u8]) -> Result<Vec<u8>, DecodeError> {
 pub async fn get_download_link(
     client: ClientWithMiddleware,
     pick_code: String,
-) -> Result<DownloadInfo, Box<dyn Error + Send + Sync>> {
+) -> Result<DownloadInfo, CloudError> {
     let mut key = [0u8; 16];
     rand::rng().fill(&mut key);
     let params = json!({

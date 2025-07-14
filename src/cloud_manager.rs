@@ -1,11 +1,10 @@
 use crate::{
     CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, TX,
     cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link},
-    config_manager::{CONFIG, Config, Message},
-    errors::CatError,
+    config_manager::{CONFIG, Config, Message, SafeSend},
+    errors::{CatError, CloudError, DownloadError},
     login_with_qrcode::login_with_qrcode,
 };
-use anyhow::anyhow;
 use futures::future::join_all;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
@@ -19,7 +18,6 @@ use serde_json::{Value, json};
 use std::{
     cell::Cell,
     collections::HashMap,
-    error::Error,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -112,7 +110,7 @@ pub fn extract_magnet_hash(link: &str) -> Option<String> {
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
-pub async fn get_cloud_cookies() -> Result<String, String> {
+pub async fn get_cloud_cookies() -> Result<String, CatError> {
     let try_times = Cell::new(0);
     match Retry::spawn(FixedInterval::from_millis(5000).take(5), async || {
         if try_times.get() > 0 {
@@ -124,9 +122,9 @@ pub async fn get_cloud_cookies() -> Result<String, String> {
     .await
     {
         Ok(cookies) => Ok(cookies),
-        Err(error) => Err(format!(
+        Err(error) => Err(CatError::GetCookie(format!(
             "Can not get cookies after retries!\nError: {error}"
-        )),
+        ))),
     }
 }
 
@@ -137,7 +135,7 @@ async fn download_chunk(
     end: u64,
     file: &sfs::File,
     progress: &ProgressBar,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<(), DownloadError> {
     let range_header = format!("bytes={}-{}", start, end);
     let mut response = client.get(url).header("Range", range_header).send().await?;
     let mut current: u64 = start;
@@ -150,15 +148,17 @@ async fn download_chunk(
     Ok(())
 }
 
-pub async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn download_file(url: &str, path: &Path) -> Result<(), DownloadError> {
     let client = CLIENT_DOWNLOAD.clone();
     let response = client.head(url).send().await?;
     let content_length = response
         .headers()
         .get(CONTENT_LENGTH)
-        .ok_or("Can not download")?
-        .to_str()?
-        .parse::<u64>()?;
+        .and_then(|s| s.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or(DownloadError::ContentLength(
+            "Can not get CONTENT_LENGTH".to_string(),
+        ))?;
     let average = content_length / 2;
     println!("{} {}", content_length, average);
     let progress = ProgressBar::new(content_length);
@@ -168,7 +168,10 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn Error +
             .expect("progress style should be valid!"),
     );
     let mut current: u64 = 0;
-    fs::create_dir_all(path.parent().ok_or("path's parent folder is missing")?).await?;
+    fs::create_dir_all(path.parent().ok_or(DownloadError::Path(
+        "path's parent folder is missing".to_string(),
+    ))?)
+    .await?;
     let file = sfs::File::create(path)?;
     let mut futs = Vec::new();
     futs.push(download_chunk(
@@ -197,7 +200,7 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn Error +
     Ok(())
 }
 
-pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
+pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, CloudError> {
     let client = CLIENT_WITH_RETRY_MOBILE.clone();
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
@@ -232,13 +235,14 @@ pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, Box<dyn Erro
         .into_iter()
         .map(|i| match i.hash {
             Some(hash) => Ok(hash),
-            None => extract_magnet_hash(&i.url).ok_or("invalid magnet link"),
+            None => extract_magnet_hash(&i.url)
+                .ok_or(CloudError::Param("invalid magnet link".to_string())),
         })
-        .collect::<Result<Vec<String>, &str>>()?;
+        .collect::<Result<Vec<String>, CloudError>>()?;
     Ok(result)
 }
 
-pub async fn del_cloud_task(hash: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn del_cloud_task(hash: &str) -> Result<(), CloudError> {
     let client = CLIENT_WITH_RETRY.clone();
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
@@ -259,7 +263,7 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), Box<dyn Error + Send + Syn
         .next()
         .and_then(|s| s.split("=").nth(1))
         .and_then(|s| s.split("_").next())
-        .ok_or("invalid cookies!")?;
+        .ok_or(CloudError::CookiesParse("invalid cookies!".to_string()))?;
     let data = serde_json::json!({
         "hash[0]": hash,
         "uid": uid,
@@ -281,7 +285,7 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), Box<dyn Error + Send + Syn
     }
 }
 
-pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow::Error> {
+pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, CloudError> {
     let client = CLIENT_WITH_RETRY.clone();
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
@@ -308,9 +312,9 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow
     let tasks_response: TasksResponse = match serde_json::from_str(&response) {
         Ok(value) => value,
         Err(_) => {
-            return Err(anyhow!(
+            return Err(CloudError::Api(format!(
                 "Can not get valid tasks list! Error response: {response}"
-            ));
+            )));
         }
     };
     let mut pages = tasks_response.page_count;
@@ -336,9 +340,9 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, anyhow
         let tasks_response: TasksResponse = match serde_json::from_str(&response) {
             Ok(value) => value,
             Err(_) => {
-                return Err(anyhow!(
+                return Err(CloudError::Api(format!(
                     "Can not get valid tasks list! Error response: {response}"
-                ));
+                )));
             }
         };
         pages = tasks_response.page_count;
@@ -357,7 +361,7 @@ pub async fn list_files(
     folder_id: &str,
     offset: i32,
     limit: i32,
-) -> Result<FileListResponse, CatError> {
+) -> Result<FileListResponse, CloudError> {
     let params = json!(
         {
             "aid": "1",
@@ -412,7 +416,7 @@ pub async fn list_files(
 pub async fn list_all_files(
     client: ClientWithMiddleware,
     folder_id: &str,
-) -> Result<Vec<FileInfo>, Box<dyn Error + Send + Sync>> {
+) -> Result<Vec<FileInfo>, CloudError> {
     let response = list_files(client.clone(), &folder_id, 0, 20).await?;
     let file_count = response.count;
     let mut current = response.files.len() as i32;
@@ -426,10 +430,7 @@ pub async fn list_all_files(
     Ok(files)
 }
 
-pub async fn download_a_folder(
-    folder_id: &str,
-    ani_name: Option<&str>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Result<(), CloudError> {
     let client = CLIENT_WITH_RETRY.clone();
     let mut storge_path = PathBuf::new();
     storge_path.push("downloads/115");
@@ -482,21 +483,25 @@ pub async fn download_a_folder(
     Ok(())
 }
 
-pub async fn check_cookies() -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn check_cookies() -> Result<(), CatError> {
     let client = CLIENT_WITH_RETRY.clone();
     match list_files(client, "0", 0, 1).await {
         Ok(_) => {}
         Err(e) => {
-            if let CatError::Api(_) = e {
+            if let CloudError::Api(_) = e {
                 println!("Cookies is expired, try to update...");
                 let cookies = get_cloud_cookies().await?;
-                let tx = TX.load().as_deref().ok_or("exiting now...")?.clone();
+                let tx = TX
+                    .load()
+                    .as_deref()
+                    .ok_or(CatError::Exit("exiting now...".to_string()))?
+                    .clone();
                 let notify = Arc::new(Notify::new());
                 let cmd = Box::new(|config: &mut Config| {
                     config.cookies = cookies;
                 });
                 let msg = Message::new(cmd, Some(notify.clone()));
-                tx.send(msg)?;
+                tx.send_msg(msg);
                 notify.notified().await;
                 println!("Cookies is now up to date!");
             } else {
@@ -510,7 +515,7 @@ pub async fn check_cookies() -> Result<(), Box<dyn Error + Send + Sync>> {
 pub async fn get_file_info(
     client: ClientWithMiddleware,
     folder_id: &str,
-) -> Result<FileInfoResponse, CatError> {
+) -> Result<FileInfoResponse, CloudError> {
     let params = json!({
         "cid": folder_id
     });

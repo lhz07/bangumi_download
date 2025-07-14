@@ -11,7 +11,7 @@ use tokio::{
 use crate::{
     END_NOTIFY, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
     cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
-    config_manager::{CONFIG, Config, Message, modify_config},
+    config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
     update_rss::start_rss_receive,
 };
 
@@ -172,14 +172,14 @@ pub async fn refresh_download() {
                                 config.hash_ani_slow.insert(insert_key, insert_value);
                             });
                             let msg = Message::new(cmd, None);
-                            tx.send(msg).unwrap();
+                            tx.send_msg(msg);
                             let notify = Arc::new(Notify::new());
                             let remove_key = task_hash.to_string();
                             let cmd = Box::new(move |config: &mut Config| {
                                 config.hash_ani.remove(&remove_key);
                             });
                             let msg = Message::new(cmd, Some(notify.clone()));
-                            tx.send(msg).unwrap();
+                            tx.send_msg(msg);
                             notify.notified().await;
                             task_download_time.remove(task_hash);
                             restart_refresh_download_slow().await;
@@ -306,5 +306,5 @@ async fn del_a_task<T: DeleteTask + 'static>(task_hash: &str) {
     let tx = TX.load().as_deref().unwrap().clone();
     let cmd = T::del_a_task(task_hash.to_string());
     let msg = Message::new(cmd, None);
-    tx.send(msg).unwrap();
+    tx.send_msg(msg);
 }
