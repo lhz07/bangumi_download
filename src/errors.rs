@@ -4,8 +4,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CatError {
-    #[error("Decode error: {0}")]
-    Decode(#[from] DecodeError),
+    #[error("Socket error: {0}")]
+    Socket(#[from] SocketError),
     #[error("RSS parse error: {0}")]
     RSS(#[from] quick_xml::de::DeError),
     #[error("Thread Join error: {0}")]
@@ -14,8 +14,6 @@ pub enum CatError {
     Parse(String),
     #[error(transparent)]
     Cloud(#[from] CloudError),
-    #[error(transparent)]
-    Download(#[from] DownloadError),
     #[error("Get cookie error: {0}")]
     GetCookie(String),
     #[error("Deserialize error: {0}")]
@@ -29,9 +27,9 @@ pub enum CloudError {
     #[error("Decrypt error: {0}")]
     Decrypt(#[from] DecodeError),
     #[error("Cookies error: {0}")]
-    Cookies(#[from] InvalidHeaderValue),
+    CookiesParse(#[from] InvalidHeaderValue),
     #[error("Cookies parse error: {0}")]
-    CookiesParse(String),
+    Cookies(String),
     #[error("Deserialize error: {0}")]
     Deserialize(#[from] serde_json::Error),
     #[error("Api error: {0}")]
@@ -58,13 +56,13 @@ pub enum DownloadError {
 pub enum SocketError {
     #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
-    #[error("Socket error: {0}")]
-    Socket(String),
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 impl From<String> for SocketError {
     fn from(value: String) -> Self {
-        Self::Socket(value)
+        Self::Other(value)
     }
 }
 
@@ -100,13 +98,29 @@ impl From<reqwest_middleware::Error> for CloudError {
 
 impl From<reqwest::Error> for CatError {
     fn from(value: reqwest::Error) -> Self {
-        Self::Download(DownloadError::Request(RequestError::Client(value)))
+        Self::Cloud(CloudError::Download(DownloadError::Request(
+            RequestError::Client(value),
+        )))
     }
 }
 
 impl From<reqwest_middleware::Error> for CatError {
     fn from(value: reqwest_middleware::Error) -> Self {
-        Self::Download(DownloadError::Request(RequestError::Middleware(value)))
+        Self::Cloud(CloudError::Download(DownloadError::Request(
+            RequestError::Middleware(value),
+        )))
+    }
+}
+
+impl From<DownloadError> for CatError {
+    fn from(value: DownloadError) -> Self {
+        Self::Cloud(CloudError::Download(value))
+    }
+}
+
+impl From<std::io::Error> for CatError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Socket(SocketError::IO(value))
     }
 }
 
@@ -114,7 +128,6 @@ impl From<reqwest_middleware::Error> for CatError {
 pub enum RequestError {
     #[error("HTTP client error: {0}")]
     Client(#[from] reqwest::Error),
-
     #[error("Request middleware error: {0}")]
     Middleware(#[from] reqwest_middleware::Error),
     #[error("Status error: {0}")]

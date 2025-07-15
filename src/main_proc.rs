@@ -12,7 +12,7 @@ use crate::{
     END_NOTIFY, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
     cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
     config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
-    errors::{CatError, CloudError},
+    errors::{CatError, CloudError, DownloadError},
     update_rss::start_rss_receive,
 };
 
@@ -86,7 +86,11 @@ pub async fn refresh_rss() {
         println!("\nChecking updates...\n");
         let rss_links = &CONFIG.load_full().rss_links;
         let urls = rss_links.values().collect::<Vec<&String>>();
-        start_rss_receive(urls).await;
+        if let Err(e) = start_rss_receive(urls).await {
+            eprintln!("start rss receive error: {}", e);
+            END_NOTIFY.notify_waiters();
+            break;
+        }
         println!("\nCheck finished!\n");
         println!("refresh rss is sleeping");
         tokio::select! {
@@ -218,9 +222,15 @@ pub async fn restart_refresh_download() -> Result<(), CatError> {
         .await
         .take_if(|h| h.is_finished());
     if let Some(h) = handle {
-        h.await??;
-        let download_handle = tokio::spawn(refresh_download());
-        REFRESH_DOWNLOAD.lock().await.replace(download_handle);
+        match h.await? {
+            Ok(()) => (),
+            Err(CatError::Cloud(CloudError::Download(DownloadError::Request(e)))) => {
+                eprintln!("{}", e);
+                let download_handle = tokio::spawn(refresh_download());
+                REFRESH_DOWNLOAD.lock().await.replace(download_handle);
+            }
+            Err(e) => Err(e)?,
+        }
     }
     Ok(())
 }
@@ -231,9 +241,15 @@ pub async fn restart_refresh_download_slow() -> Result<(), CatError> {
         .await
         .take_if(|h| h.is_finished());
     if let Some(h) = handle {
-        h.await??;
-        let download_handle = tokio::spawn(refresh_download_slow());
-        REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
+        match h.await? {
+            Ok(()) => (),
+            Err(CatError::Cloud(CloudError::Download(DownloadError::Request(e)))) => {
+                eprintln!("{}", e);
+                let download_handle = tokio::spawn(refresh_download_slow());
+                REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
+            }
+            Err(e) => Err(e)?,
+        }
     }
     Ok(())
 }

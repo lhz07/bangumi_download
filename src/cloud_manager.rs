@@ -263,7 +263,7 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), CloudError> {
         .next()
         .and_then(|s| s.split("=").nth(1))
         .and_then(|s| s.split("_").next())
-        .ok_or(CloudError::CookiesParse("invalid cookies!".to_string()))?;
+        .ok_or(CloudError::Cookies("invalid cookies!".to_string()))?;
     let data = serde_json::json!({
         "hash[0]": hash,
         "uid": uid,

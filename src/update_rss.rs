@@ -3,7 +3,7 @@ use crate::{
     cloud_manager::cloud_download,
     config_manager::{CONFIG, Config, Message, SafeSend},
     errors::{CatError, CloudError, DownloadError},
-    main_proc::restart_refresh_download,
+    main_proc::{restart_refresh_download, restart_refresh_download_slow},
 };
 use futures::future::{self, join_all};
 use quick_xml::de;
@@ -11,12 +11,8 @@ use regex::Regex;
 use reqwest_middleware::ClientWithMiddleware;
 use scraper::{Element, Html, Selector};
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::AtomicI32},
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Notify, mpsc};
-use tokio_retry::{Retry, strategy::FibonacciBackoff};
 
 #[derive(Debug, Deserialize)]
 pub struct RSS {
@@ -29,12 +25,14 @@ pub struct Channel {
     link: String,
     item: Vec<Item>,
 }
+
 #[derive(Debug, Deserialize)]
 pub struct Item {
     title: String,
     link: String,
     torrent: Torrent,
 }
+
 #[derive(Debug, Deserialize)]
 pub struct Torrent {
     #[serde(rename = "pubDate")]
@@ -81,18 +79,11 @@ pub async fn get_response_text(
     }
 }
 
-pub async fn start_rss_receive(urls: Vec<&String>) {
+pub async fn start_rss_receive(urls: Vec<&String>) -> Result<(), CatError> {
     // read the config
     let old_config = CONFIG.load_full();
     // create the sender futures
-
-    let tx = match TX.load_full() {
-        Some(tx) => tx.clone(),
-        None => {
-            println!("exiting...");
-            return;
-        }
-    };
+    let tx = TX.load_full().ok_or(CatError::Exit)?;
     let mut futs = Vec::new();
     for url in urls {
         futs.push(rss_receive(
@@ -107,10 +98,19 @@ pub async fn start_rss_receive(urls: Vec<&String>) {
     let results = future::join_all(futs).await;
     println!("rss refresh finished");
     for result in results {
-        if let Err(error) = result {
-            eprintln!("{}", error);
+        match result {
+            Ok(()) => (),
+            Err(CatError::Cloud(CloudError::Download(DownloadError::Request(e)))) => {
+                eprintln!("{}", e)
+            }
+            Err(e) => Err(e)?,
         }
     }
+    println!("restart refresh download in rss receive");
+    restart_refresh_download().await?;
+    restart_refresh_download_slow().await?;
+    println!("finish restart refresh download");
+    Ok(())
 }
 
 pub fn filter_episode<'a, T: Filter>(
@@ -159,18 +159,14 @@ pub async fn get_all_episode_magnet_links(
     ani_id: &str,
     sub_id: &str,
     filter: &HashMap<String, Vec<String>>,
-) -> Option<Vec<String>> {
+) -> Result<Vec<String>, CatError> {
     let url = format!(
         "https://mikanime.tv/Home/ExpandEpisodeTable?bangumiId={ani_id}&subtitleGroupId={sub_id}&take=100"
     );
     let client = CLIENT_WITH_RETRY.clone();
-    let response = match get_response_text(&url, client).await {
-        Ok(text) => text,
-        Err(error) => {
-            eprintln!("Get all episode magnet links: {error}");
-            return None;
-        }
-    };
+    let response = get_response_text(&url, client)
+        .await
+        .map_err(|e| CatError::Parse(format!("Get all episode magnet links error: {e}")))?;
     let soup = Html::parse_document(&response);
     let selector =
         Selector::parse("a.magnet-link-wrap").expect("html element selector must be valid!");
@@ -180,17 +176,19 @@ pub async fn get_all_episode_magnet_links(
         items.push(LItem {
             title: element.text().collect::<String>(),
             link: element
-                .next_sibling_element()?
-                .value()
-                .attr("data-clipboard-text")?
-                .to_string(),
+                .next_sibling_element()
+                .and_then(|element| element.value().attr("data-clipboard-text"))
+                .and_then(|s| Some(s.to_string()))
+                .ok_or(CatError::Parse(
+                    "parse all episode magnet links error".to_string(),
+                ))?,
         });
     }
     let magnet_links = filter_episode(&items, filter, sub_id)
         .iter()
         .map(|link| link.to_string())
         .collect();
-    Some(magnet_links)
+    Ok(magnet_links)
 }
 
 async fn get_subgroup_name(url: &str, client: ClientWithMiddleware) -> Option<String> {
@@ -216,45 +214,24 @@ pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, CatErro
         .collect::<Vec<_>>();
     let results = join_all(futs).await;
     println!("process links");
-    let mut magnet_links = Vec::new();
-    for i in results {
-        match i {
-            Some(link) => magnet_links.push(link),
-            None => {
-                return Err(CatError::Parse("Can not get the magnet link!".to_string()));
-            }
-        }
-    }
+    let magnet_links = results.into_iter().collect::<Result<Vec<_>, _>>()?;
     Ok(magnet_links)
 }
 
-pub async fn get_a_magnet_link(url: &str, client: ClientWithMiddleware) -> Option<String> {
-    let try_times = AtomicI32::new(0);
-    let response = match Retry::spawn(FibonacciBackoff::from_millis(5000).take(3), async || {
-        if try_times.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-            eprintln!("can not open {url}, waiting for retry.");
-        }
-        try_times.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let res = get_response_text(url, client.clone()).await?;
-        Ok::<String, DownloadError>(res)
-    })
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("can not open {url}, error: {error}, already tried 3 times");
-            return None;
-        }
-    };
-    println!("got the response!");
+pub async fn get_a_magnet_link(
+    url: &str,
+    client: ClientWithMiddleware,
+) -> Result<String, CatError> {
+    let response = get_response_text(url, client.clone()).await?;
     let resource = Html::parse_document(&response);
     let selector = Selector::parse("a[href]").expect("html element selector must be valid!");
     let magnet_link = resource
         .select(&selector)
         .filter_map(|element| element.value().attr("href"))
         .find(|href| href.starts_with("magnet:"))
-        .map(|href| href.to_string())?;
-    Some(magnet_link)
+        .map(|href| href.to_string())
+        .ok_or(CatError::Parse("can not get a magnet link".to_string()))?;
+    Ok(magnet_link)
 }
 
 pub async fn check_rss_link(url: &str, client: ClientWithMiddleware) -> Result<(), String> {
@@ -319,11 +296,8 @@ pub async fn rss_receive(
         });
         let msg = Message::new(cmd, None);
         tx.send_msg(msg);
-        if let Some(links) =
-            get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await
-        {
-            magnet_links = links
-        }
+        magnet_links
+            .extend(get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await?);
         let insert_title = title.clone();
         let insert_url = url.to_string();
         let cmd = Box::new(|config: &mut Config| {
@@ -380,9 +354,6 @@ pub async fn rss_receive(
                 let msg = Message::new(cmd, Some(notify.clone()));
                 tx.send_msg(msg);
                 notify.notified().await;
-                println!("restart refresh download in rss receive");
-                restart_refresh_download().await?;
-                println!("finish restart refresh download");
             }
             Err(error) => {
                 eprintln!("cloud download magnet error: {}", error);

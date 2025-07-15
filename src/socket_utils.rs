@@ -12,7 +12,8 @@ use tokio::{
 
 use crate::cli_tools::{ADD_LINK, DOWNLOAD_FOLDER};
 use crate::cloud_manager::download_a_folder;
-use crate::errors::SocketError;
+use crate::errors::{CatError, SocketError};
+use crate::main_proc::{restart_refresh_download, restart_refresh_download_slow};
 
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
@@ -33,7 +34,9 @@ pub trait SocketStateDetect {
 }
 
 pub trait SocketStreamHandle {
-    fn handle_stream(stream: SocketStream) -> impl std::future::Future<Output = ()> + Send;
+    fn handle_stream(
+        stream: SocketStream,
+    ) -> impl std::future::Future<Output = Result<(), CatError>> + Send;
 }
 
 #[derive(Debug)]
@@ -210,67 +213,63 @@ impl Drop for SocketListener {
         unsafe { ManuallyDrop::drop(&mut self.listener) };
         let state = self.try_connect();
         if let SocketState::Discarded = state {
-            fs::remove_file(&self.path).unwrap();
+            if let Err(e) = fs::remove_file(&self.path) {
+                eprintln!("Can not remove the unix socket file, error: {}", e);
+            }
         }
     }
 }
 
 impl SocketStreamHandle for SocketStream {
-    async fn handle_stream(mut stream: SocketStream) {
+    async fn handle_stream(mut stream: SocketStream) -> Result<(), CatError> {
         use crate::{
             CLIENT_WITH_RETRY, TX,
             config_manager::CONFIG,
             update_rss::{check_rss_link, rss_receive},
         };
 
-        let keep_alive = stream.read_str().await.unwrap() == "keep-alive";
+        let keep_alive = stream.read_str().await? == "keep-alive";
         loop {
-            let content = stream.read_str().await.unwrap();
+            let content = stream.read_str().await?;
             match content.as_str() {
                 // implement add link
                 ADD_LINK => {
-                    let rss_link = stream.read_str().await.unwrap();
+                    let rss_link = stream.read_str().await?;
                     let client = CLIENT_WITH_RETRY.clone();
                     match check_rss_link(&rss_link, client).await {
                         Ok(()) => {
                             let temp_tx = TX.load();
-                            let tx = temp_tx.as_ref().unwrap();
+                            let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
                             let old_config = CONFIG.load_full();
-                            rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
-                                .await
-                                .unwrap();
+                            let rss_update = async || -> Result<(), CatError> {
+                                rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
+                                    .await?;
+                                restart_refresh_download().await?;
+                                restart_refresh_download_slow().await?;
+                                Ok(())
+                            };
+                            if let Err(e) = rss_update().await {
+                                eprintln!("add link error: {e}");
+                            }
                         }
-                        Err(error) => stream.write_str(&error).await.unwrap(),
+                        Err(error) => stream.write_str(&error).await?,
                     }
-                    // stream
-                    //     .write_str(format!("adding a link: {}", link).as_str())
-                    //     .await
-                    //     .unwrap();
-                    // tokio::time::sleep(Duration::from_secs(2)).await;
-                    // stream
-                    //     .write_str(format!("try to add the link: {}", link).as_str())
-                    //     .await
-                    //     .unwrap();
-                    // tokio::time::sleep(Duration::from_secs(2)).await;
-                    // stream
-                    //     .write_str("Sorry😢, please try again later")
-                    //     .await
-                    //     .unwrap();
-                    stream.write_str("\0").await.unwrap();
+                    stream.write_str("\0").await?;
                 }
                 DOWNLOAD_FOLDER => {
-                    let cid = stream.read_str().await.unwrap();
+                    let cid = stream.read_str().await?;
                     if let Err(e) = download_a_folder(&cid, None).await {
-                        stream.write_str(&e.to_string()).await.unwrap();
+                        stream.write_str(&e.to_string()).await?;
                     }
-                    stream.write_str("\0").await.unwrap();
+                    stream.write_str("\0").await?;
                 }
                 "" => (),
-                _ => stream.write_str("response from server").await.unwrap(),
+                _ => stream.write_str("response from server").await?,
             }
             if !keep_alive {
                 break;
             }
         }
+        Ok(())
     }
 }
