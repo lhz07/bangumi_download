@@ -133,7 +133,7 @@ async fn test_status_iter() {
     REFRESH_NOTIFY.add_permits(1);
     let timer = Instant::now();
     loop {
-        let t = *wait_time.next().unwrap();
+        let t = *wait_time.next();
         println!("{:?}", t);
         if count == 4 {
             break;

@@ -69,13 +69,13 @@ pub async fn get_download_link(
     let params = json!({
         "pickcode": pick_code
     });
-    let params = serde_json::to_string(&params).unwrap();
+    let params = serde_json::to_string(&params)?;
     let data = encode(params.bytes().collect(), &key);
     let mut form_data = HashMap::new();
     form_data.insert("data", data);
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
-    headers.insert(COOKIE, cookies.parse().unwrap());
+    headers.insert(COOKIE, cookies.parse()?);
     let response = client
         .post("https://proapi.115.com/app/chrome/downurl")
         .headers(headers)
@@ -83,7 +83,7 @@ pub async fn get_download_link(
             "t",
             std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .expect("UNIX_EPOCH is always earlier than now")
                 .as_secs()
                 .to_string(),
         )])
@@ -99,10 +99,6 @@ pub async fn get_download_link(
         let data_str = decode(result.data, &key)?;
         let download_data = serde_json::from_slice::<DownloadData>(&data_str)?;
         for download_info in download_data.into_values() {
-            // println!(
-            //     "download file {}\n\tname: {}\n\turl: {}\n\tsize: {}",
-            //     i, download_info.file_name, download_info.url.url, download_info.file_size
-            // );
             return Ok(download_info);
         }
     }

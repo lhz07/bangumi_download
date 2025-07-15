@@ -12,6 +12,7 @@ use tokio::{
 
 use crate::cli_tools::{ADD_LINK, DOWNLOAD_FOLDER};
 use crate::cloud_manager::download_a_folder;
+use crate::errors::SocketError;
 
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
@@ -25,7 +26,7 @@ pub trait SocketStateDetect {
             Err(error) => match error.kind() {
                 io::ErrorKind::ConnectionRefused => SocketState::Discarded,
                 io::ErrorKind::NotFound => SocketState::NotFound,
-                _ => SocketState::Other,
+                _ => SocketState::Other(error),
             },
         }
     }
@@ -40,12 +41,12 @@ pub enum SocketState {
     Working,
     Discarded,
     NotFound,
-    Other,
+    Other(io::Error),
 }
 
 // SocketPath ------------------------------------------------
 pub struct SocketPath {
-    path: PathBuf,
+    pub path: PathBuf,
 }
 
 impl SocketPath {
@@ -59,6 +60,26 @@ impl SocketPath {
 
     pub fn to_listener(&self) -> Result<SocketListener, io::Error> {
         SocketListener::bind(&self.path)
+    }
+
+    pub fn initial_listener(&self) -> Result<SocketListener, SocketError> {
+        let listener = match self.to_listener() {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => match self.try_connect() {
+                SocketState::Discarded => {
+                    println!(
+                        "socket path is already in use, and we can not connect it, trying removing it"
+                    );
+                    std::fs::remove_file(&self.path)?;
+                    self.to_listener()?
+                }
+                SocketState::Other(e) => Err(e)?,
+                SocketState::Working => Err(format!("The socket is already working!"))?,
+                SocketState::NotFound => Err(format!("Can not find the socket!??"))?,
+            },
+            Err(e) => Err(e)?,
+        };
+        Ok(listener)
     }
 
     pub async fn to_stream(&self) -> Result<SocketStream, io::Error> {
@@ -212,7 +233,8 @@ impl SocketStreamHandle for SocketStream {
                     let client = CLIENT_WITH_RETRY.clone();
                     match check_rss_link(&rss_link, client).await {
                         Ok(()) => {
-                            let tx = TX.load().as_deref().unwrap().clone();
+                            let temp_tx = TX.load();
+                            let tx = temp_tx.as_ref().unwrap();
                             let old_config = CONFIG.load_full();
                             rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
                                 .await

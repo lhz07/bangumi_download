@@ -1,7 +1,8 @@
 use crate::{
-    CLIENT_WITH_RETRY, ERROR_STATUS, TX,
+    CLIENT_WITH_RETRY, TX,
     cloud_manager::cloud_download,
     config_manager::{CONFIG, Config, Message, SafeSend},
+    errors::{CatError, CloudError, DownloadError},
     main_proc::restart_refresh_download,
 };
 use futures::future::{self, join_all};
@@ -12,7 +13,6 @@ use scraper::{Element, Html, Selector};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
-    error::Error,
     sync::{Arc, atomic::AtomicI32},
 };
 use tokio::sync::{Notify, mpsc};
@@ -72,15 +72,12 @@ impl Filter for LItem {
 pub async fn get_response_text(
     url: &str,
     client: ClientWithMiddleware,
-) -> Result<String, anyhow::Error> {
+) -> Result<String, DownloadError> {
     let response = client.get(url).send().await?;
     if response.status().is_success() {
         Ok(response.text().await?)
     } else {
-        Err(anyhow::format_err!(
-            "Request failed with status: {}",
-            response.status()
-        ))
+        Err(format!("Request failed with status: {}", response.status()))?
     }
 }
 
@@ -88,16 +85,22 @@ pub async fn start_rss_receive(urls: Vec<&String>) {
     // read the config
     let old_config = CONFIG.load_full();
     // create the sender futures
+
+    let tx = match TX.load_full() {
+        Some(tx) => tx.clone(),
+        None => {
+            println!("exiting...");
+            return;
+        }
+    };
     let mut futs = Vec::new();
     for url in urls {
-        let tx = match TX.load().as_deref() {
-            Some(tx) => tx.clone(),
-            None => {
-                println!("exiting...");
-                return;
-            }
-        };
-        futs.push(rss_receive(tx, url, &old_config, CLIENT_WITH_RETRY.clone()));
+        futs.push(rss_receive(
+            &tx,
+            url,
+            &old_config,
+            CLIENT_WITH_RETRY.clone(),
+        ));
     }
     // get the results
     println!("waiting for refreshing rss");
@@ -164,7 +167,7 @@ pub async fn get_all_episode_magnet_links(
     let response = match get_response_text(&url, client).await {
         Ok(text) => text,
         Err(error) => {
-            eprintln!("Error: {error}");
+            eprintln!("Get all episode magnet links: {error}");
             return None;
         }
     };
@@ -205,7 +208,7 @@ async fn get_subgroup_name(url: &str, client: ClientWithMiddleware) -> Option<St
     Some(sub_name.to_string())
 }
 
-pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, &str> {
+pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, CatError> {
     let client = CLIENT_WITH_RETRY.clone();
     let futs = item_urls
         .iter()
@@ -218,8 +221,7 @@ pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, &str> {
         match i {
             Some(link) => magnet_links.push(link),
             None => {
-                println!("return error");
-                return Err("Can not get the magnet link!");
+                return Err(CatError::Parse("Can not get the magnet link!".to_string()));
             }
         }
     }
@@ -234,7 +236,7 @@ pub async fn get_a_magnet_link(url: &str, client: ClientWithMiddleware) -> Optio
         }
         try_times.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let res = get_response_text(url, client.clone()).await?;
-        Ok::<String, anyhow::Error>(res)
+        Ok::<String, DownloadError>(res)
     })
     .await
     {
@@ -271,18 +273,18 @@ pub async fn check_rss_link(url: &str, client: ClientWithMiddleware) -> Result<(
 }
 
 pub async fn rss_receive(
-    tx: mpsc::UnboundedSender<Message>,
+    tx: &mpsc::UnboundedSender<Message>,
     url: &str,
     old_config: &Config,
     client: ClientWithMiddleware,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+) -> Result<(), CatError> {
     let response = client.get(url).send().await?.text().await?;
     let rss = de::from_str::<RSS>(&response)?;
     let channel = rss.channel;
     let items = channel.item;
     let latest_item = items
         .first()
-        .ok_or_else(|| anyhow::Error::msg("can not found latest item!"))?;
+        .ok_or(CatError::Parse("can not found latest item!".to_string()))?;
     let parse_link = async || -> Option<(String, String, String, String)> {
         let mut split_ani_sub = channel
             .link
@@ -300,7 +302,9 @@ pub async fn rss_receive(
             .to_string();
         Some((ani_id, sub_id, sub_name, bangumi_name))
     };
-    let (ani_id, sub_id, sub_name, bangumi_name) = parse_link().await.ok_or("")?;
+    let (ani_id, sub_id, sub_name, bangumi_name) = parse_link()
+        .await
+        .ok_or(CatError::Parse("can not found latest item!".to_string()))?;
     let title = format!("[{sub_name}] {bangumi_name}");
     let latest_update = latest_item.torrent.pub_date.clone();
     let bangumi_id = format!("{ani_id}&{sub_id}");
@@ -341,15 +345,7 @@ pub async fn rss_receive(
         println!("获取到以下剧集：");
         let filter = &old_config.filter;
         let item_links = filter_episode(&new_items, filter, &sub_id);
-        magnet_links = match get_all_magnet(item_links).await {
-            Ok(links) => links,
-            Err(error) => {
-                eprintln!("Error: {:?}", error);
-                ERROR_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
-                drop(TX.swap(None));
-                return Err("Can not get magnet links!".into());
-            }
-        };
+        magnet_links = get_all_magnet(item_links).await?;
         let insert_key = format!("{ani_id}&{sub_id}");
         let cmd = Box::new(|config: &mut Config| {
             config.bangumi.insert(insert_key, latest_update);
@@ -385,11 +381,11 @@ pub async fn rss_receive(
                 tx.send_msg(msg);
                 notify.notified().await;
                 println!("restart refresh download in rss receive");
-                restart_refresh_download().await;
+                restart_refresh_download().await?;
                 println!("finish restart refresh download");
             }
             Err(error) => {
-                eprintln!("Error: {:?}", error);
+                eprintln!("cloud download magnet error: {}", error);
                 let cmd = Box::new(move |config: &mut Config| {
                     config
                         .magnets
@@ -399,9 +395,7 @@ pub async fn rss_receive(
                 });
                 let msg = Message::new(cmd, None);
                 tx.send_msg(msg);
-                ERROR_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
-                drop(TX.swap(None));
-                return Err("Can not add magnet to cloud!".into());
+                return Err(CloudError::Api("Can not add magnet to cloud!".to_string()))?;
             }
         }
     }

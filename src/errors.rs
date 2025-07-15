@@ -4,16 +4,24 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CatError {
-    #[error(transparent)]
-    Download(#[from] DownloadError),
+    #[error("Decode error: {0}")]
+    Decode(#[from] DecodeError),
+    #[error("RSS parse error: {0}")]
+    RSS(#[from] quick_xml::de::DeError),
+    #[error("Thread Join error: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("Bangumi parse error: {0}")]
+    Parse(String),
     #[error(transparent)]
     Cloud(#[from] CloudError),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
     #[error("Get cookie error: {0}")]
     GetCookie(String),
     #[error("Deserialize error: {0}")]
     Deserialize(#[from] serde_json::Error),
-    #[error("Exiting: {0}")]
-    Exit(String),
+    #[error("Exiting now...")]
+    Exit,
 }
 
 #[derive(Error, Debug)]
@@ -46,6 +54,20 @@ pub enum DownloadError {
     ContentLength(String),
 }
 
+#[derive(Error, Debug)]
+pub enum SocketError {
+    #[error("IO error: {0}")]
+    IO(#[from] std::io::Error),
+    #[error("Socket error: {0}")]
+    Socket(String),
+}
+
+impl From<String> for SocketError {
+    fn from(value: String) -> Self {
+        Self::Socket(value)
+    }
+}
+
 impl From<String> for CloudError {
     fn from(value: String) -> Self {
         Self::Api(value)
@@ -76,6 +98,18 @@ impl From<reqwest_middleware::Error> for CloudError {
     }
 }
 
+impl From<reqwest::Error> for CatError {
+    fn from(value: reqwest::Error) -> Self {
+        Self::Download(DownloadError::Request(RequestError::Client(value)))
+    }
+}
+
+impl From<reqwest_middleware::Error> for CatError {
+    fn from(value: reqwest_middleware::Error) -> Self {
+        Self::Download(DownloadError::Request(RequestError::Middleware(value)))
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum RequestError {
     #[error("HTTP client error: {0}")]
@@ -83,4 +117,18 @@ pub enum RequestError {
 
     #[error("Request middleware error: {0}")]
     Middleware(#[from] reqwest_middleware::Error),
+    #[error("Status error: {0}")]
+    Status(String),
+}
+
+impl From<String> for RequestError {
+    fn from(value: String) -> Self {
+        Self::Status(value)
+    }
+}
+
+impl From<String> for DownloadError {
+    fn from(value: String) -> Self {
+        Self::Request(RequestError::Status(value))
+    }
 }

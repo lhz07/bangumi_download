@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::{Notify, Semaphore},
+    sync::{Notify, Semaphore, mpsc::UnboundedSender},
     task::JoinHandle,
 };
 
@@ -12,6 +12,7 @@ use crate::{
     END_NOTIFY, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
     cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
     config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
+    errors::{CatError, CloudError},
     update_rss::start_rss_receive,
 };
 
@@ -21,7 +22,10 @@ pub trait ConsumeSema {
 
 impl ConsumeSema for Semaphore {
     async fn consume(&self) -> () {
-        self.acquire().await.unwrap().forget();
+        self.acquire()
+            .await
+            .expect("semaphore should be valid")
+            .forget();
     }
 }
 
@@ -37,20 +41,15 @@ impl<'a, T: Clone> StatusIter<'a, T> {
     pub fn reset(&mut self) {
         self.index = 0;
     }
-}
-
-impl<'a, T: Clone> Iterator for StatusIter<'a, T> {
-    type Item = &'a T;
-    fn next(&mut self) -> Option<Self::Item> {
+    pub fn next(&mut self) -> &'a T {
         if self.index < self.data.len() {
             let next_item = &self.data[self.index];
             self.index += 1;
-            Some(next_item)
+            return next_item;
         } else if self.index == self.data.len() {
-            Some(&self.data[self.index - 1])
-        } else {
-            None
+            return &self.data[self.index - 1];
         }
+        unreachable!("Status iter should always return before this line")
     }
 }
 
@@ -71,6 +70,7 @@ pub async fn initialize() -> JoinHandle<()> {
         std::process::exit(1);
     }
     let _rss_refresh_handle = tokio::spawn(refresh_rss());
+    // TODO: add actual error handling instead of just printing it
     let download_handle = tokio::spawn(refresh_download());
     let download_slow_handle = tokio::spawn(refresh_download_slow());
     REFRESH_DOWNLOAD.lock().await.replace(download_handle);
@@ -100,7 +100,13 @@ pub async fn refresh_rss() {
     println!("exit refresh rss");
 }
 
-pub async fn refresh_download() {
+pub async fn check_refresh_download_error() {
+    if let Err(e) = refresh_download().await {
+        eprintln!("{e}")
+    }
+}
+
+pub async fn refresh_download() -> Result<(), CatError> {
     println!("refresh download is started");
     const WAIT_TIME_LIST: [Duration; 6] = [
         Duration::from_secs(10),
@@ -131,11 +137,12 @@ pub async fn refresh_download() {
                 break;
             }
         };
+        let tx = TX.load_full().ok_or(CatError::Exit)?;
         for task in tasks_list {
             // download task failed, delete it
             let task_hash = &task.hash;
             if task.status == -1 {
-                del_a_task::<HashAni>(task_hash).await;
+                del_a_task::<HashAni>(&tx, task_hash).await?;
             }
             if task.percent_done == 100 {
                 // download file
@@ -154,7 +161,7 @@ pub async fn refresh_download() {
                     continue;
                 }
                 // after download
-                del_a_task::<HashAni>(task_hash).await;
+                del_a_task::<HashAni>(&tx, task_hash).await?;
                 println!("Task {} is finished and deleted!", task.name);
             } else {
                 println!("Task {} is downloading: {}%", task.name, task.percent_done);
@@ -162,10 +169,6 @@ pub async fn refresh_download() {
                     Some(instant) => {
                         if instant.elapsed().as_secs() > 1800 {
                             // move to slow queue
-                            let tx = match TX.load().as_deref() {
-                                Some(tx) => tx.clone(),
-                                None => return,
-                            };
                             let insert_key = task_hash.to_string();
                             let insert_value = hash_ani[task_hash].to_string();
                             let cmd = Box::new(|config: &mut Config| {
@@ -182,7 +185,7 @@ pub async fn refresh_download() {
                             tx.send_msg(msg);
                             notify.notified().await;
                             task_download_time.remove(task_hash);
-                            restart_refresh_download_slow().await;
+                            restart_refresh_download_slow().await?;
                         }
                     }
                     None => {
@@ -191,7 +194,7 @@ pub async fn refresh_download() {
                 }
             }
         }
-        let wait_task = tokio::time::timeout(*wait_time.next().unwrap(), REFRESH_NOTIFY.consume());
+        let wait_task = tokio::time::timeout(*wait_time.next(), REFRESH_NOTIFY.consume());
         tokio::select! {
             result = wait_task => {
                 match result {
@@ -205,32 +208,37 @@ pub async fn refresh_download() {
         }
     }
     println!("refresh download is finished");
+    Ok(())
 }
 
-pub async fn restart_refresh_download() {
+pub async fn restart_refresh_download() -> Result<(), CatError> {
     REFRESH_NOTIFY.add_permits(1);
     let handle = REFRESH_DOWNLOAD_SLOW
         .lock()
         .await
         .take_if(|h| h.is_finished());
-    if handle.is_some() {
+    if let Some(h) = handle {
+        h.await??;
         let download_handle = tokio::spawn(refresh_download());
         REFRESH_DOWNLOAD.lock().await.replace(download_handle);
     }
+    Ok(())
 }
 
-pub async fn restart_refresh_download_slow() {
+pub async fn restart_refresh_download_slow() -> Result<(), CatError> {
     let handle = REFRESH_DOWNLOAD_SLOW
         .lock()
         .await
         .take_if(|h| h.is_finished());
-    if handle.is_some() {
+    if let Some(h) = handle {
+        h.await??;
         let download_handle = tokio::spawn(refresh_download_slow());
         REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
     }
+    Ok(())
 }
 
-pub async fn refresh_download_slow() {
+pub async fn refresh_download_slow() -> Result<(), CatError> {
     println!("refresh download slow is started");
     let wait_time = Duration::from_secs(3600);
     let mut error_task = HashMap::new();
@@ -251,11 +259,12 @@ pub async fn refresh_download_slow() {
                 break;
             }
         };
+        let tx = TX.load_full().ok_or(CatError::Exit)?;
         for task in tasks_list {
             // download task failed, delete it
             let task_hash = &task.hash;
             if task.status == -1 {
-                del_a_task::<HashAniSlow>(task_hash).await;
+                del_a_task::<HashAniSlow>(&tx, task_hash).await?;
             }
             if task.percent_done == 100 {
                 // download file
@@ -274,13 +283,14 @@ pub async fn refresh_download_slow() {
                     continue;
                 }
                 // after download
-                del_a_task::<HashAniSlow>(task_hash).await;
+                del_a_task::<HashAniSlow>(&tx, task_hash).await?;
                 println!("Task {} is finished and deleted!", task.name);
             }
         }
         tokio::time::sleep(wait_time).await;
     }
     println!("refresh download slow is finished");
+    Ok(())
 }
 struct HashAni;
 struct HashAniSlow;
@@ -301,10 +311,13 @@ impl DeleteTask for HashAniSlow {
         })
     }
 }
-async fn del_a_task<T: DeleteTask + 'static>(task_hash: &str) {
-    del_cloud_task(task_hash).await.unwrap();
-    let tx = TX.load().as_deref().unwrap().clone();
+async fn del_a_task<T: DeleteTask + 'static>(
+    tx: &UnboundedSender<Message>,
+    task_hash: &str,
+) -> Result<(), CloudError> {
+    del_cloud_task(task_hash).await?;
     let cmd = T::del_a_task(task_hash.to_string());
     let msg = Message::new(cmd, None);
     tx.send_msg(msg);
+    Ok(())
 }

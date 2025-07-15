@@ -491,11 +491,8 @@ pub async fn check_cookies() -> Result<(), CatError> {
             if let CloudError::Api(_) = e {
                 println!("Cookies is expired, try to update...");
                 let cookies = get_cloud_cookies().await?;
-                let tx = TX
-                    .load()
-                    .as_deref()
-                    .ok_or(CatError::Exit("exiting now...".to_string()))?
-                    .clone();
+                let temp_tx = TX.load();
+                let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
                 let notify = Arc::new(Notify::new());
                 let cmd = Box::new(|config: &mut Config| {
                     config.cookies = cookies;

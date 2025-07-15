@@ -51,7 +51,13 @@ async fn main() -> ExitCode {
         }
     } else {
         let config_manager = initialize().await;
-        let listener = socket_path.to_listener().unwrap();
+        let listener = match socket_path.initial_listener() {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!("Can not bind unix socket, Error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         ctrlc::set_handler(|| {
             if EXIT_NOW.load(std::sync::atomic::Ordering::Relaxed) {
                 println!("force quit!");
