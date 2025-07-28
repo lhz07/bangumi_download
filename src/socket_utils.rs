@@ -1,19 +1,23 @@
+use bincode::{Decode, Encode};
+use futures::future::join3;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::{env::temp_dir, fs, path::PathBuf};
-
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::select;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::{
     io::{self, AsyncReadExt},
     net::UnixListener,
 };
 
-use crate::cli_tools::{ADD_LINK, DOWNLOAD_FOLDER};
-use crate::cloud_manager::download_a_folder;
 use crate::errors::{CatError, SocketError};
-use crate::main_proc::{restart_refresh_download, restart_refresh_download_slow};
+use crate::tui::progress_bar::SimpleBar;
+use crate::{END_NOTIFY, main_proc};
 
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
@@ -33,12 +37,6 @@ pub trait SocketStateDetect {
     }
 }
 
-pub trait SocketStreamHandle {
-    fn handle_stream(
-        stream: SocketStream,
-    ) -> impl std::future::Future<Output = Result<(), CatError>> + Send;
-}
-
 #[derive(Debug)]
 pub enum SocketState {
     Working,
@@ -48,6 +46,7 @@ pub enum SocketState {
 }
 
 // SocketPath ------------------------------------------------
+#[derive(Clone)]
 pub struct SocketPath {
     pub path: PathBuf,
 }
@@ -114,6 +113,10 @@ impl SocketStream {
         Self { stream }
     }
 
+    pub fn split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
+        self.stream.into_split()
+    }
+
     pub async fn write_str(&mut self, content: &str) -> Result<(), io::Error> {
         if content.bytes().len() > u32::MAX as usize {
             return Err(io::Error::new(
@@ -140,6 +143,39 @@ impl SocketStream {
         Ok(String::from_utf8_lossy(&content_buf).to_string())
     }
 
+    pub async fn read_msg(&mut self) -> Result<SocketMsg, io::Error> {
+        let mut len_buf = [0u8; 4];
+        if let Err(error) = self.stream.read_exact(&mut len_buf).await {
+            match error.kind() {
+                io::ErrorKind::UnexpectedEof => return Ok(SocketMsg::Null),
+                _ => return Err(error),
+            }
+        }
+        let mut content_buf = vec![0u8; u32::from_be_bytes(len_buf) as usize];
+        self.stream.read_exact(&mut content_buf).await?;
+        let config = bincode::config::standard().with_big_endian();
+        let msg = bincode::decode_from_slice::<SocketMsg, _>(&content_buf, config)
+            .unwrap()
+            .0;
+        Ok(msg)
+    }
+
+    pub async fn write_msg(&mut self, msg: SocketMsg) -> io::Result<()> {
+        let config = bincode::config::standard().with_big_endian();
+        let content = bincode::encode_to_vec(msg, config).unwrap();
+        if content.len() > u32::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("content length must be less than {} bytes", u32::MAX),
+            ));
+        }
+        self.stream
+            .write_all(&(content.len() as u32).to_be_bytes())
+            .await?;
+        self.stream.write_all(&content).await?;
+        Ok(())
+    }
+
     pub async fn read_str_to_end(&mut self) -> Result<(), io::Error> {
         loop {
             let response = self.read_str().await?;
@@ -148,6 +184,28 @@ impl SocketStream {
             }
             println!("{}", response);
         }
+    }
+
+    async fn handle_stream(
+        stream: SocketStream,
+        state: SyncInfo,
+        rx: broadcast::Receiver<SocketMsg>,
+    ) -> Result<(), CatError> {
+        // here we should pass the SocketMsg received from rx transparently
+        // we need to use another channel, because `OwnedWriteHalf` needs mut to use `write_all`,
+        // which means we should use a lock or a channel.
+        let (read, write) = stream.split();
+
+        let (socket_tx, socket_rx) = unbounded_channel::<SocketMsg>();
+        let (read_result, write_result, _) = join3(
+            main_proc::read_socket(socket_tx.clone(), state, read),
+            main_proc::write_socket(socket_rx, write),
+            main_proc::forward_socket_msg(socket_tx, rx),
+        )
+        .await;
+        read_result?;
+        write_result?;
+        Ok(())
     }
 }
 
@@ -168,6 +226,7 @@ impl DerefMut for SocketStream {
 pub struct SocketListener {
     listener: ManuallyDrop<UnixListener>,
     path: PathBuf,
+    state: SyncInfo,
 }
 
 impl SocketListener {
@@ -176,20 +235,70 @@ impl SocketListener {
         P: AsRef<Path>,
     {
         let listener = ManuallyDrop::new(UnixListener::bind(&path)?);
+        let state = SyncInfo {
+            progresses: Vec::new(),
+        };
         Ok(Self {
             listener,
             path: path.as_ref().to_path_buf(),
+            state,
         })
     }
+    async fn accept_stream(&self, tx: &broadcast::Sender<SocketMsg>) {
+        match self.listener.accept().await {
+            Ok((stream, _)) => {
+                let rx = tx.subscribe();
+                let state = self.state.clone();
+                let stream = SocketStream::new(stream);
 
-    pub async fn listening(&self) {
+                tokio::spawn(SocketStream::handle_stream(stream, state, rx));
+            }
+            Err(err) => eprintln!("Error: {}", err),
+        }
+    }
+
+    async fn receive_broadcast(
+        &mut self,
+        recv_result: Result<SocketMsg, broadcast::error::RecvError>,
+    ) {
+        // here, we handle the original socket messages, and update state with them.
+        if let Ok(msg) = recv_result {
+            match msg {
+                SocketMsg::Download(msg) => match msg.state {
+                    DownloadState::Start((name, size)) => {
+                        let simple_bar = SimpleBar::new(name, msg.id, size);
+                        self.state.progresses.push(simple_bar);
+                    }
+                    DownloadState::Downloading(delta) => {
+                        for progress in &mut self.state.progresses {
+                            if progress.id() == msg.id {
+                                progress.inc(delta);
+                            }
+                        }
+                    }
+                    DownloadState::Finished => {
+                        self.state
+                            .progresses
+                            .retain(|progress| progress.id() != msg.id);
+                    }
+                },
+                _ => (),
+            }
+        }
+    }
+
+    pub async fn listening(
+        &mut self,
+        tx: broadcast::Sender<SocketMsg>,
+        mut rx: broadcast::Receiver<SocketMsg>,
+    ) {
         loop {
-            match self.listener.accept().await {
-                Ok((stream, _)) => {
-                    let stream = SocketStream::new(stream);
-                    tokio::spawn(SocketStream::handle_stream(stream));
+            select! {
+                _ = self.accept_stream(&tx) => {}
+                recv_result = rx.recv() => {
+                    self.receive_broadcast(recv_result).await;
                 }
-                Err(err) => eprintln!("Error: {}", err),
+                _ = END_NOTIFY.notified() => {}
             }
         }
     }
@@ -220,56 +329,80 @@ impl Drop for SocketListener {
     }
 }
 
-impl SocketStreamHandle for SocketStream {
-    async fn handle_stream(mut stream: SocketStream) -> Result<(), CatError> {
-        use crate::{
-            CLIENT_WITH_RETRY, TX,
-            config_manager::CONFIG,
-            update_rss::{check_rss_link, rss_receive},
-        };
+pub trait WriteSocketMsg {
+    fn write_msg(
+        &mut self,
+        msg: SocketMsg,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+}
 
-        let keep_alive = stream.read_str().await? == "keep-alive";
-        loop {
-            let content = stream.read_str().await?;
-            match content.as_str() {
-                // implement add link
-                ADD_LINK => {
-                    let rss_link = stream.read_str().await?;
-                    let client = CLIENT_WITH_RETRY.clone();
-                    match check_rss_link(&rss_link, client).await {
-                        Ok(()) => {
-                            let temp_tx = TX.load();
-                            let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
-                            let old_config = CONFIG.load_full();
-                            let rss_update = async || -> Result<(), CatError> {
-                                rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
-                                    .await?;
-                                restart_refresh_download().await?;
-                                restart_refresh_download_slow().await?;
-                                Ok(())
-                            };
-                            if let Err(e) = rss_update().await {
-                                eprintln!("add link error: {e}");
-                            }
-                        }
-                        Err(error) => stream.write_str(&error).await?,
-                    }
-                    stream.write_str("\0").await?;
-                }
-                DOWNLOAD_FOLDER => {
-                    let cid = stream.read_str().await?;
-                    if let Err(e) = download_a_folder(&cid, None).await {
-                        stream.write_str(&e.to_string()).await?;
-                    }
-                    stream.write_str("\0").await?;
-                }
-                "" => (),
-                _ => stream.write_str("response from server").await?,
-            }
-            if !keep_alive {
-                break;
-            }
+pub trait ReadSocketMsg {
+    fn read_msg(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<SocketMsg, io::Error>> + Send;
+}
+
+impl WriteSocketMsg for OwnedWriteHalf {
+    async fn write_msg(&mut self, msg: SocketMsg) -> io::Result<()> {
+        let config = bincode::config::standard().with_big_endian();
+        let content = bincode::encode_to_vec(msg, config).unwrap();
+        if content.len() > u32::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("content length must be less than {} bytes", u32::MAX),
+            ));
         }
+        self.write_all(&(content.len() as u32).to_be_bytes())
+            .await?;
+        self.write_all(&content).await?;
         Ok(())
     }
+}
+
+impl ReadSocketMsg for OwnedReadHalf {
+    async fn read_msg(&mut self) -> Result<SocketMsg, io::Error> {
+        let mut len_buf = [0u8; 4];
+        if let Err(error) = self.read_exact(&mut len_buf).await {
+            match error.kind() {
+                io::ErrorKind::UnexpectedEof => return Ok(SocketMsg::Null),
+                _ => return Err(error),
+            }
+        }
+        let mut content_buf = vec![0u8; u32::from_be_bytes(len_buf) as usize];
+        self.read_exact(&mut content_buf).await?;
+        let config = bincode::config::standard().with_big_endian();
+        let msg = bincode::decode_from_slice::<SocketMsg, _>(&content_buf, config)
+            .unwrap()
+            .0;
+        Ok(msg)
+    }
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum SocketMsg {
+    Download(DownloadMsg),
+    SyncQuery,
+    SyncResp(SyncInfo),
+    Null,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct DownloadMsg {
+    /// task id
+    pub id: String,
+    pub state: DownloadState,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum DownloadState {
+    /// (name, size)
+    Start((String, u64)),
+    /// increments
+    Downloading(u64),
+    Finished,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct SyncInfo {
+    progresses: Vec<SimpleBar>,
 }

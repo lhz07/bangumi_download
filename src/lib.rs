@@ -8,6 +8,7 @@ pub mod login_with_qrcode;
 pub mod main_proc;
 pub mod output_tools;
 pub mod socket_utils;
+pub mod tui;
 pub mod update_rss;
 
 #[cfg(test)]
@@ -26,7 +27,10 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::errors::CatError;
+use crate::{
+    errors::CatError,
+    output_tools::{StdOut, WriteToOutput},
+};
 pub const PC_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -95,3 +99,4 @@ pub static REFRESH_DOWNLOAD_SLOW: Lazy<Mutex<Option<JoinHandle<Result<(), CatErr
 pub static REFRESH_NOTIFY: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(0));
 pub static END_NOTIFY: Lazy<Notify> = Lazy::new(|| Notify::new());
 pub static EXIT_NOW: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+pub static mut PRINT: Lazy<Box<dyn WriteToOutput>> = Lazy::new(|| Box::new(StdOut));

@@ -1,10 +1,16 @@
 use std::{
     collections::HashMap,
+    io,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::{Notify, Semaphore, mpsc::UnboundedSender},
+    net::unix::{OwnedReadHalf, OwnedWriteHalf},
+    select,
+    sync::{
+        Notify, Semaphore, broadcast,
+        mpsc::{UnboundedReceiver, UnboundedSender},
+    },
     task::JoinHandle,
 };
 
@@ -13,6 +19,7 @@ use crate::{
     cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
     config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
     errors::{CatError, CloudError, DownloadError},
+    socket_utils::{ReadSocketMsg, SocketMsg, SyncInfo, WriteSocketMsg},
     update_rss::start_rss_receive,
 };
 
@@ -335,5 +342,92 @@ async fn del_a_task<T: DeleteTask + 'static>(
     let cmd = T::del_a_task(task_hash.to_string());
     let msg = Message::new(cmd, None);
     tx.send_msg(msg);
+    Ok(())
+}
+
+pub async fn write_socket(
+    mut rx: UnboundedReceiver<SocketMsg>,
+    mut write: OwnedWriteHalf,
+) -> io::Result<()> {
+    while let Some(msg) = rx.recv().await {
+        write.write_msg(msg).await?;
+    }
+    Ok(())
+}
+
+pub async fn forward_socket_msg(
+    tx: UnboundedSender<SocketMsg>,
+    mut rx: broadcast::Receiver<SocketMsg>,
+) {
+    while let Ok(msg) = rx.recv().await {
+        if let Err(_) = tx.send(msg) {
+            // log error
+        }
+    }
+}
+
+pub async fn read_socket(
+    tx: UnboundedSender<SocketMsg>,
+    state: SyncInfo,
+    mut read: OwnedReadHalf,
+) -> io::Result<()> {
+    let mut state = Some(state);
+    async fn handle_msg(
+        msg: SocketMsg,
+        tx: &UnboundedSender<SocketMsg>,
+        state: &mut Option<SyncInfo>,
+    ) {
+        match msg {
+            // no need to handle this
+            SocketMsg::Download(_) => (),
+            SocketMsg::SyncQuery => {
+                if let Some(state) = state.take() {
+                    if let Err(_) = tx.send(SocketMsg::SyncResp(state)) {
+                        // log error
+                    }
+                }
+            }
+            // no need to handle this
+            SocketMsg::SyncResp(_) => (),
+            // no need to handle this
+            SocketMsg::Null => (),
+        }
+        // ADD_LINK => {
+        // let rss_link = stream.read_str().await?;
+        // let client = CLIENT_WITH_RETRY.clone();
+        // match check_rss_link(&rss_link, client).await {
+        //     Ok(()) => {
+        // let temp_tx = TX.load();
+        // let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
+        // let old_config = CONFIG.load_full();
+        // let rss_update = async || -> Result<(), CatError> {
+        //     rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
+        // .await?;
+        //     restart_refresh_download().await?;
+        //     restart_refresh_download_slow().await?;
+        //     Ok(())
+        // };
+        // if let Err(e) = rss_update().await {
+        //     eprintln!("add link error: {e}");
+        // }
+        //     }
+        //     Err(error) => stream.write_str(&error).await?,
+        // }
+        //     }
+        //     DOWNLOAD_FOLDER => {
+        // let cid = stream.read_str().await?;
+        // if let Err(e) = download_a_folder(&cid, None).await {
+        //     stream.write_str(&e.to_string()).await?;
+        // }
+        //     }
+    }
+    loop {
+        select! {
+            result = read.read_msg() => {
+                handle_msg(result?, &tx, &mut state).await;
+            }
+            _ = END_NOTIFY.notified() => {break;}
+        }
+    }
     Ok(())
 }

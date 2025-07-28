@@ -1,24 +1,51 @@
-use std::process::ExitCode;
+use std::{io, process::ExitCode};
 
 use bangumi_download::{
     END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
-    cli_tools::Cli,
     main_proc::initialize,
-    socket_utils::{SocketPath, SocketState, SocketStateDetect},
+    socket_utils::{SocketMsg, SocketPath, SocketState, SocketStateDetect},
+    tui::app::App,
 };
-use tokio::signal;
+use futures::future::join3;
+use tokio::{signal, sync::broadcast};
+
+// we need to give the macro a var or let it use the global var
+// macro_rules! printf {
+//     () => {
+//         PRINT.print(format!("\n"))
+//     };
+//     ($($arg:tt)*) => {{
+//         #[allow(static_mut_refs)]
+//         unsafe{PRINT.print(format!($($arg)*));}
+//     }};
+// }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let socket_path = SocketPath::new("bangumi_download.socket");
     if let SocketState::Working = socket_path.try_connect() {
-        if let Err(e) = Cli::cli_main(socket_path).await {
-            eprintln!("Socket error: {e}");
+        let terminal = ratatui::init();
+        let (mut app, rx, handles) = App::initialize(terminal, socket_path);
+        let results = join3(
+            app.event_loop(rx),
+            handles.socket_handle,
+            handles.ui_events_handle,
+        )
+        .await;
+        ratatui::restore();
+        let check_results = || -> Result<(), io::Error> {
+            results.0?;
+            results.1.unwrap()?;
+            results.2.unwrap()?;
+            Ok(())
+        };
+        if let Err(e) = check_results() {
+            eprintln!("Error: {e}");
             return ExitCode::FAILURE;
         }
     } else {
         let config_manager = initialize().await;
-        let listener = match socket_path.initial_listener() {
+        let mut listener = match socket_path.initial_listener() {
             Ok(listener) => listener,
             Err(e) => {
                 eprintln!("Can not bind unix socket, Error: {e}");
@@ -32,6 +59,8 @@ async fn main() -> ExitCode {
             }
         })
         .unwrap();
+        // I suppose the capacity is the count of messages
+        let (broadcast_tx, broadcast_rx) = broadcast::channel::<SocketMsg>(50);
         tokio::select! {
             _ = signal::ctrl_c() => {
                 println!("\nExiting...");
@@ -44,7 +73,7 @@ async fn main() -> ExitCode {
                 println!("dropped TX, waiting for config_manager to finish...");
                 config_manager.await.unwrap();
             },
-            _ = listener.listening() => {}
+            _ = listener.listening(broadcast_tx, broadcast_rx) => {}
         }
     }
     if ERROR_STATUS.load(std::sync::atomic::Ordering::Relaxed) {

@@ -5,6 +5,7 @@ use crate::{
     cloud::download::{encode, get_download_link},
     cloud_manager::{download_a_folder, download_file, get_file_info, list_all_files, list_files},
     config_manager::Config,
+    socket_utils::{DownloadMsg, DownloadState, SocketMsg, SocketPath, SocketStream},
 };
 use config_manager::*;
 use quick_xml::de;
@@ -587,4 +588,40 @@ async fn test_multi_thread_download() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_bincode() {
+    let socket_path = SocketPath::new("bangumi_download_test.socket");
+    let listener_path = socket_path.clone();
+    let msg = SocketMsg::Download(DownloadMsg {
+        id: "test1".to_string(),
+        state: socket_utils::DownloadState::Downloading(2233),
+    });
+    let listener_handle = tokio::spawn(async move {
+        let listener = listener_path.to_listener().unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = SocketStream::new(stream);
+        let msg = stream.read_msg().await.unwrap();
+        println!("{:?}", msg);
+        drop(listener);
+        msg
+    });
+    let sender = tokio::spawn(async move {
+        let mut stream = socket_path.to_stream().await.unwrap();
+        stream.write_msg(msg).await.unwrap();
+    });
+    sender.await.unwrap();
+    let listener_result = listener_handle.await.unwrap();
+    if let SocketMsg::Download(download_msg) = listener_result {
+        let DownloadMsg { id, state } = download_msg;
+        assert_eq!(id, "test1");
+        if let DownloadState::Downloading(p) = state {
+            assert_eq!(p, 2233);
+        } else {
+            panic!()
+        }
+    } else {
+        panic!()
+    }
 }

@@ -9,20 +9,30 @@ use crate::socket_utils::SocketStream;
 //     }};
 // }
 
+// macro_rules! printf {
+//     () => {
+//         PRINT.print(format!("\n"))
+//     };
+//     ($($arg:tt)*) => {{
+//         PRINT.print($crate::format_args_nl!($($arg)*));
+//     }};
+// }
+
 pub trait WriteToOutput {
-    fn print(&mut self, content: String) -> impl std::future::Future<Output = ()> + Send;
+    fn print(&mut self, content: String);
 }
 
 impl WriteToOutput for SocketStream {
-    async fn print(&mut self, content: String) {
-        self.write_str(&content).await.unwrap();
+    fn print(&mut self, content: String) {
+        // self.write_str(&content).await.unwrap();
+        println!("{}", content);
     }
 }
 
-struct _StdOut;
+pub struct StdOut;
 
-impl WriteToOutput for _StdOut {
-    async fn print(&mut self, content: String) -> () {
+impl WriteToOutput for StdOut {
+    fn print(&mut self, content: String) -> () {
         println!("{}", content);
     }
 }
