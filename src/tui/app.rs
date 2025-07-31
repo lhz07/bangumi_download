@@ -1,17 +1,20 @@
-use std::io;
+use std::{io, time::Duration};
 
 use crate::{
     END_NOTIFY,
-    socket_utils::{DownloadState, ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg},
-    tui::{events::LEvent, progress_bar::ProgressBar},
+    config_manager::SafeSend,
+    socket_utils::{ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg},
+    tui::{
+        events::LEvent,
+        progress_bar::ProgressBar,
+        ui::{CurrentScreen, InputState, Popup},
+    },
 };
 use futures::future::join;
 use ratatui::{
     DefaultTerminal,
-    crossterm::event::{self, Event, KeyCode},
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    widgets::{Block, Borders, Gauge, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    crossterm::event::{self},
+    widgets::ScrollbarState,
 };
 use tokio::{
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
@@ -19,18 +22,29 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task::JoinHandle,
 };
+use tui_logger::TuiWidgetState;
 
-pub enum CurrentScreen {
-    Main,
-    Downloading,
-    Finished,
-    Log,
+impl SafeSend<SocketMsg> for UnboundedSender<SocketMsg> {
+    fn send_msg(&self, msg: SocketMsg) {
+        if let Err(e) = self.send(msg) {
+            log::error!("It seems that the Receiver of SocketMsg is closed too early, error: {e}");
+        }
+    }
 }
+
+impl SafeSend<LEvent> for UnboundedSender<LEvent> {
+    fn send_msg(&self, msg: LEvent) {
+        if let Err(e) = self.send(msg) {
+            log::error!("It seems that the Receiver of LEvent is closed too early, error: {e}");
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ListState {
-    offset: usize,
-    scroll_state: ScrollbarState,
-    progresses: Vec<ProgressBar>,
+    pub(crate) offset: usize,
+    pub(crate) scroll_state: ScrollbarState,
+    pub(crate) progresses: Vec<ProgressBar>,
 }
 
 pub struct Handles {
@@ -39,11 +53,15 @@ pub struct Handles {
 }
 
 pub struct App {
-    current_screen: CurrentScreen,
-    terminal: DefaultTerminal,
-    downloading_state: ListState,
-    finished_state: ListState,
-    socket_tx: UnboundedSender<SocketMsg>,
+    pub(crate) current_screen: CurrentScreen,
+    pub(crate) current_popup: Option<Popup>,
+    pub(crate) input_state: InputState,
+    pub(crate) terminal: DefaultTerminal,
+    pub(crate) downloading_state: ListState,
+    pub(crate) finished_state: ListState,
+    pub(crate) log_widget_state: TuiWidgetState,
+    pub(crate) socket_tx: UnboundedSender<SocketMsg>,
+    pub(crate) count: u64,
 }
 
 impl App {
@@ -51,13 +69,23 @@ impl App {
         terminal: DefaultTerminal,
         socket_path: SocketPath,
     ) -> (Self, UnboundedReceiver<LEvent>, Handles) {
+        // Set max_log_level to Trace
+        tui_logger::init_logger(log::LevelFilter::Trace).unwrap();
+
+        // Set default level for unknown targets to Trace
+        tui_logger::set_default_level(log::LevelFilter::Trace);
+        for i in 1..50 {
+            log::info!("{i}");
+        }
         let downloading_state = ListState {
             offset: 0,
             scroll_state: ScrollbarState::new(0),
             progresses: Vec::new(),
         };
         let finished_state = downloading_state.clone();
+        // the event loop chanel
         let (event_tx, event_rx) = unbounded_channel::<LEvent>();
+        // the socket channel
         let (socket_tx, socket_rx) = unbounded_channel::<SocketMsg>();
         let socket_handle = tokio::spawn(Self::initialize_socket(
             event_tx.clone(),
@@ -69,28 +97,32 @@ impl App {
             socket_handle,
             ui_events_handle,
         };
+        let log_widget_state = TuiWidgetState::new();
         let app = App {
-            current_screen: CurrentScreen::Main,
+            current_screen: CurrentScreen::Downloading,
+            current_popup: None,
+            input_state: InputState::NotInput,
             terminal,
             downloading_state,
             finished_state,
             socket_tx,
+            log_widget_state,
+            count: 0,
         };
-        let _ = app.socket_tx.send(SocketMsg::SyncQuery);
+        app.socket_tx.send_msg(SocketMsg::SyncQuery);
         (app, event_rx, handles)
     }
     pub async fn receive_ui_events(tx: UnboundedSender<LEvent>) -> io::Result<()> {
-        let handle = tokio::task::spawn_blocking(move || -> io::Result<()> {
-            loop {
+        loop {
+            if event::poll(Duration::from_millis(50))? {
                 let event = LEvent::Tui(event::read()?);
-                if let Err(_) = tx.send(event) {
-                    // log error
-                }
+                tx.send_msg(event);
             }
-        });
-        select! {
-            result = handle => {result.unwrap()?}
-            _ = END_NOTIFY.notified() => {}
+            let event = LEvent::Render;
+            if let Err(e) = tx.send(event) {
+                log::error!("It seems that the Receiver of LEvent is closed too early, error: {e}");
+                break;
+            }
         }
         Ok(())
     }
@@ -117,9 +149,7 @@ impl App {
         loop {
             select! {
                 result = read.read_msg() => {
-                    if let Err(_) = tx.send(LEvent::Socket(result?)) {
-                        // log error
-                    }
+                    tx.send_msg(LEvent::Socket(result?));
                 }
                 _ = END_NOTIFY.notified() => {break;}
             }
@@ -130,172 +160,17 @@ impl App {
         mut rx: UnboundedReceiver<SocketMsg>,
         mut write: OwnedWriteHalf,
     ) -> io::Result<()> {
-        while let Some(msg) = rx.recv().await {
-            write.write_msg(msg).await?;
-        }
-        Ok(())
-    }
-    pub fn render(&mut self) -> io::Result<()> {
-        self.terminal.draw(|f| {
-            match &self.current_screen {
-                CurrentScreen::Main => {}
-                CurrentScreen::Downloading => {
-                    let state = &mut self.downloading_state;
-                    let area = f.area();
-                    let main_layout = Layout::horizontal([
-                        Constraint::Length(area.width - 3),
-                        Constraint::Length(3),
-                    ])
-                    .split(area);
-                    let height = area.height as usize;
-                    // 每个进度条占用 3 行：上下边框 + 内容
-                    let per_item_height = 3;
-                    // 可视的进度条个数
-                    let visible_count = height / per_item_height;
-                    // 计算可见区间
-                    state.offset = state
-                        .offset
-                        .min(state.progresses.len().saturating_sub(visible_count));
-                    let end = (state.offset + visible_count).min(state.progresses.len());
-                    state.scroll_state = state
-                        .scroll_state
-                        .content_length(state.progresses.len().saturating_sub(visible_count));
-                    // 为每个进度条生成一个长度为 per_item_height 的约束
-                    let constraints =
-                        vec![Constraint::Length(per_item_height as u16); end - state.offset];
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints(constraints)
-                        .split(main_layout[0]);
-                    let mut chunks1 = chunks.iter().enumerate();
-                    let mut j = 0;
-                    state.progresses.retain_mut(|p| {
-                        let percent = p.pos();
-                        let speed = (p.calculate_speed() as f64 / 1000000.0 + 0.5) as u64;
-                        if j >= state.offset
-                            && j < end
-                            && let Some((i, chunk)) = chunks1.next()
-                        {
-                            let global_index = state.offset + i;
-                            let gauge = Gauge::default()
-                                .block(Block::default().borders(Borders::ALL).title(format!(
-                                    "Task {} [诸神字幕组] 中二病也要谈恋爱！恋  {} MB/s",
-                                    global_index, speed
-                                )))
-                                .gauge_style(
-                                    Style::default()
-                                        .fg(Color::Rgb(0, 212, 241))
-                                        .bg(Color::Rgb(37, 50, 56)),
-                                )
-                                .percent(percent);
-                            f.render_widget(gauge, *chunk);
-                        }
-                        j += 1;
-                        percent != 100
-                    });
-                    f.render_stateful_widget(
-                        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                            .begin_symbol(Some("↑"))
-                            .end_symbol(Some("↓")),
-                        main_layout[1],
-                        &mut state.scroll_state,
-                    );
-                }
-                CurrentScreen::Finished => {}
-                CurrentScreen::Log => {}
-            }
-        })?;
-        Ok(())
-    }
-    pub async fn event_loop(&mut self, mut rx: UnboundedReceiver<LEvent>) -> io::Result<()> {
-        while let Some(event) = rx.recv().await {
-            match event {
-                LEvent::Tui(ui_event) => {
-                    // deal with keyboard...
-                    match ui_event {
-                        Event::Key(key) => {
-                            match key.code {
-                                KeyCode::Char('q') => break, // q 退出
-                                KeyCode::Down => {
-                                    // 滚动下一条
-                                    let scroll_down = |state: &mut ListState| {
-                                        if state.offset + 1 < state.progresses.len() {
-                                            state.offset += 1;
-                                            state.scroll_state =
-                                                state.scroll_state.position(state.offset);
-                                        }
-                                    };
-                                    match &mut self.current_screen {
-                                        CurrentScreen::Downloading => {
-                                            let state = &mut self.downloading_state;
-                                            scroll_down(state);
-                                        }
-                                        CurrentScreen::Finished => {
-                                            let state = &mut self.finished_state;
-                                            scroll_down(state);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                KeyCode::Up => {
-                                    // 滚动上一条
-                                    let scroll_up = |state: &mut ListState| {
-                                        if state.offset > 0 {
-                                            state.offset -= 1;
-                                            state.scroll_state =
-                                                state.scroll_state.position(state.offset);
-                                        }
-                                    };
-                                    match &mut self.current_screen {
-                                        CurrentScreen::Downloading => {
-                                            let state = &mut self.downloading_state;
-                                            scroll_up(state);
-                                        }
-                                        CurrentScreen::Finished => {
-                                            let state = &mut self.finished_state;
-                                            scroll_up(state);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => (),
+        loop {
+            select! {
+                recv_result = rx.recv() => {
+                    if let Some(msg) = recv_result {
+                        write.write_msg(msg).await?;
                     }
                 }
-                LEvent::Render => {
-                    // render ui here
-                    self.render()?;
-                }
-                LEvent::Socket(msg) => {
-                    // deal with socket message here
-                    match msg {
-                        SocketMsg::Download(msg) => match msg.state {
-                            DownloadState::Start((name, size)) => {
-                                let bar = ProgressBar::new(name, msg.id, size);
-                                self.downloading_state.progresses.push(bar);
-                            }
-                            DownloadState::Downloading(delta) => {
-                                for progress in &mut self.downloading_state.progresses {
-                                    if progress.id() == msg.id {
-                                        progress.inc(delta);
-                                    }
-                                }
-                            }
-                            DownloadState::Finished => {
-                                for progress in &mut self.downloading_state.progresses {
-                                    if progress.id() == msg.id {
-                                        progress.inc_to_finished();
-                                    }
-                                }
-                            }
-                        },
-                        _ => (),
-                    }
-                }
+                _ = END_NOTIFY.notified() => {break;}
             }
         }
+
         Ok(())
     }
 }

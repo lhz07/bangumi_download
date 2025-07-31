@@ -7,7 +7,7 @@ use crate::{
 };
 use base64::{DecodeError, Engine, engine::general_purpose};
 use rand::{self, Rng};
-use reqwest::header::{CONTENT_TYPE, COOKIE, HeaderMap};
+use reqwest::header::{COOKIE, HeaderMap};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::json;
@@ -59,7 +59,7 @@ pub fn decode(input: String, key: &[u8]) -> Result<Vec<u8>, DecodeError> {
     Ok(output.to_owned())
 }
 
-// only the pickcode of a single file works
+/// only the pickcode of a single file works
 pub async fn get_download_link(
     client: ClientWithMiddleware,
     pick_code: String,
@@ -77,7 +77,7 @@ pub async fn get_download_link(
     let mut headers = HeaderMap::new();
     headers.insert(COOKIE, cookies.parse()?);
     let response = client
-        .post("https://proapi.115.com/app/chrome/downurl")
+        .post("http://proapi.115.com/app/chrome/downurl")
         .headers(headers)
         .query(&[(
             "t",
@@ -88,13 +88,15 @@ pub async fn get_download_link(
                 .to_string(),
         )])
         .form(&form_data)
-        .header(CONTENT_TYPE, "application/json")
         .send()
         .await?
         .text()
         .await?;
     // println!("{}", response);
-    let result = serde_json::from_str::<DownloadResponse>(&response)?;
+    let result = serde_json::from_str::<DownloadResponse>(&response).map_err(|e| {
+        eprintln!("can not get download link, response: {}", response);
+        e
+    })?;
     if result.state {
         let data_str = decode(result.data, &key)?;
         let download_data = serde_json::from_slice::<DownloadData>(&data_str)?;

@@ -1,11 +1,14 @@
-use std::{collections::HashMap, fs::read_to_string, path::Path, sync::Arc};
+use std::{collections::HashMap, fs::read_to_string, sync::Arc};
 
 use super::*;
 use crate::{
     cloud::download::{encode, get_download_link},
-    cloud_manager::{download_a_folder, download_file, get_file_info, list_all_files, list_files},
+    cloud_manager::{download_a_folder, get_file_info, list_all_files, list_files},
     config_manager::Config,
-    socket_utils::{DownloadMsg, DownloadState, SocketMsg, SocketPath, SocketStream},
+    socket_utils::{
+        DownloadMsg, DownloadState, ReadSocketMsg, SocketMsg, SocketPath, SocketStream,
+        WriteSocketMsg,
+    },
 };
 use config_manager::*;
 use quick_xml::de;
@@ -579,23 +582,23 @@ async fn test_get_file_info() {
     println!("{:?}", result);
 }
 
-#[tokio::test]
-#[ignore = "this test is slow"]
-async fn test_multi_thread_download() {
-    download_file(
-        "https://dldir1v6.qq.com/qqfile/qq/QQNT/Mac/QQ_6.9.75_250710_01.dmg",
-        Path::new("downloads/qq"),
-    )
-    .await
-    .unwrap();
-}
+// #[tokio::test]
+// #[ignore = "this test is slow"]
+// async fn test_multi_thread_download() {
+//     download_file(
+//         "https://dldir1v6.qq.com/qqfile/qq/QQNT/Mac/QQ_6.9.75_250710_01.dmg",
+//         Path::new("downloads/qq"),
+//     )
+//     .await
+//     .unwrap();
+// }
 
 #[tokio::test]
 async fn test_bincode() {
     let socket_path = SocketPath::new("bangumi_download_test.socket");
     let listener_path = socket_path.clone();
     let msg = SocketMsg::Download(DownloadMsg {
-        id: "test1".to_string(),
+        id: 123456,
         state: socket_utils::DownloadState::Downloading(2233),
     });
     let listener_handle = tokio::spawn(async move {
@@ -615,7 +618,7 @@ async fn test_bincode() {
     let listener_result = listener_handle.await.unwrap();
     if let SocketMsg::Download(download_msg) = listener_result {
         let DownloadMsg { id, state } = download_msg;
-        assert_eq!(id, "test1");
+        assert_eq!(id, 123456);
         if let DownloadState::Downloading(p) = state {
             assert_eq!(p, 2233);
         } else {

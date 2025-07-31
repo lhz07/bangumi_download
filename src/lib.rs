@@ -1,4 +1,3 @@
-pub mod cli_tools;
 pub mod cloud;
 pub mod cloud_manager;
 pub mod config_manager;
@@ -6,7 +5,6 @@ pub mod crypto;
 pub mod errors;
 pub mod login_with_qrcode;
 pub mod main_proc;
-pub mod output_tools;
 pub mod socket_utils;
 pub mod tui;
 pub mod update_rss;
@@ -23,15 +21,12 @@ use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use std::{sync::atomic::AtomicBool, time::Duration};
 use tokio::{
-    sync::{Mutex, Notify, Semaphore, mpsc::UnboundedSender},
+    sync::{Mutex, Notify, Semaphore, broadcast, mpsc::UnboundedSender},
     task::JoinHandle,
 };
 
-use crate::{
-    errors::CatError,
-    output_tools::{StdOut, WriteToOutput},
-};
-pub const PC_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+use crate::{errors::CatError, socket_utils::SocketMsg};
+pub const PC_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
         .user_agent(PC_UA)
@@ -91,6 +86,9 @@ pub static CLIENT_PROXY: Lazy<ClientWithMiddleware> = Lazy::new(|| {
 });
 pub static TX: Lazy<ArcSwapOption<UnboundedSender<Message>>> =
     Lazy::new(|| ArcSwapOption::new(None));
+// I suppose the capacity is the count of messages
+pub static BROADCAST_TX: Lazy<broadcast::Sender<SocketMsg>> =
+    Lazy::new(|| broadcast::Sender::new(1000));
 pub static ERROR_STATUS: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 pub static REFRESH_DOWNLOAD: Lazy<Mutex<Option<JoinHandle<Result<(), CatError>>>>> =
     Lazy::new(|| Mutex::new(None));
@@ -99,4 +97,3 @@ pub static REFRESH_DOWNLOAD_SLOW: Lazy<Mutex<Option<JoinHandle<Result<(), CatErr
 pub static REFRESH_NOTIFY: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(0));
 pub static END_NOTIFY: Lazy<Notify> = Lazy::new(|| Notify::new());
 pub static EXIT_NOW: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-pub static mut PRINT: Lazy<Box<dyn WriteToOutput>> = Lazy::new(|| Box::new(StdOut));

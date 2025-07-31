@@ -1,12 +1,12 @@
 use crate::{
-    CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, TX,
+    BROADCAST_TX, CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, TX,
     cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link},
     config_manager::{CONFIG, Config, Message, SafeSend},
     errors::{CatError, CloudError, DownloadError},
     login_with_qrcode::login_with_qrcode,
+    socket_utils::{DownloadMsg, DownloadState, SocketMsg},
 };
 use futures::future::join_all;
-use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use reqwest::{
     Client,
@@ -21,10 +21,15 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use std::{fs as sfs, str::FromStr};
-use tokio::{fs, sync::Notify};
+use tokio::{
+    fs,
+    sync::{Notify, Semaphore},
+};
 use tokio_retry::{Retry, strategy::FixedInterval};
+use uuid::Uuid;
 
 pub const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800323d) NetType/WIFI Language/zh_CN";
 
@@ -73,6 +78,8 @@ pub struct FileInfo {
     pub file_id: Option<String>,
     #[serde(rename = "n")]
     pub name: String,
+    #[serde(rename = "s")]
+    pub size: Option<u64>,
     #[serde(rename = "pc")]
     pub pick_code: String,
 }
@@ -83,6 +90,7 @@ pub struct FileInfoResponse {
     pub name: String,
 }
 
+#[derive(Debug)]
 pub struct FileWithPath {
     pub info: FileInfo,
     pub path: PathBuf,
@@ -134,7 +142,7 @@ async fn download_chunk(
     start: u64,
     end: u64,
     file: &sfs::File,
-    progress: &ProgressBar,
+    id: u128,
 ) -> Result<(), DownloadError> {
     let range_header = format!("bytes={}-{}", start, end);
     let mut response = client.get(url).header("Range", range_header).send().await?;
@@ -142,13 +150,22 @@ async fn download_chunk(
     while let Some(chunk) = response.chunk().await? {
         file.write_all_at(&chunk, current)?;
         let delta = chunk.len() as u64;
-        progress.inc(delta);
+        let msg = SocketMsg::Download(DownloadMsg {
+            id,
+            state: DownloadState::Downloading(delta),
+        });
+        BROADCAST_TX.send_msg(msg);
         current += delta;
     }
     Ok(())
 }
 
-pub async fn download_file(url: &str, path: &Path) -> Result<(), DownloadError> {
+pub async fn download_file(
+    url: &str,
+    path: &Path,
+    id: u128,
+    size: u64,
+) -> Result<(), DownloadError> {
     let client = CLIENT_DOWNLOAD.clone();
     let response = client.head(url).send().await?;
     let content_length = response
@@ -159,14 +176,15 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), DownloadError> 
         .ok_or(DownloadError::ContentLength(
             "Can not get CONTENT_LENGTH".to_string(),
         ))?;
+    if content_length != size {
+        return Err(DownloadError::ContentLength(
+            "inconsistent content length".to_string(),
+        ));
+    }
     let average = content_length / 2;
-    println!("{} {}", content_length, average);
-    let progress = ProgressBar::new(content_length);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("{wide_bar} {bytes} / {total_bytes} ({binary_bytes_per_sec}  eta: {eta})")
-            .expect("progress style should be valid!"),
-    );
+    // ProgressStyle::default_bar()
+    //     .template("{wide_bar} {bytes} / {total_bytes} ({binary_bytes_per_sec}  eta: {eta})")
+
     let mut current: u64 = 0;
     fs::create_dir_all(path.parent().ok_or(DownloadError::Path(
         "path's parent folder is missing".to_string(),
@@ -180,7 +198,7 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), DownloadError> 
         current,
         current + average,
         &file,
-        &progress,
+        id,
     ));
     current += average;
     futs.push(download_chunk(
@@ -189,14 +207,18 @@ pub async fn download_file(url: &str, path: &Path) -> Result<(), DownloadError> 
         current,
         content_length,
         &file,
-        &progress,
+        id,
     ));
     let results = join_all(futs).await;
-    progress.finish();
     for i in results {
         i?;
     }
-    println!("finished!");
+    let msg = SocketMsg::Download(DownloadMsg {
+        id,
+        state: DownloadState::Finished,
+    });
+    BROADCAST_TX.send_msg(msg);
+    println!("{:?} finished!", path);
     Ok(())
 }
 
@@ -449,20 +471,21 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
             path: PathBuf::new(),
         })
         .collect::<Vec<_>>();
+    println!("get all files success!");
+    let mut files_to_download = Vec::new();
     while let Some(file) = files.pop() {
         match file.info.file_id {
             Some(_) => {
-                let DownloadInfo {
-                    file_name,
-                    url: FileDownloadUrl { url, .. },
-                    ..
-                } = get_download_link(client.clone(), file.info.pick_code).await?;
-                let mut path = storge_path.clone();
-                path.push(file.path);
-                path.push(&file_name);
-                download_file(&url, &path).await?;
+                let id = Uuid::now_v7().as_u128();
+                let msg = SocketMsg::Download(DownloadMsg {
+                    id,
+                    state: DownloadState::Start((file.info.name.clone(), file.info.size.unwrap())),
+                });
+                BROADCAST_TX.send_msg(msg);
+                files_to_download.push((id, file));
             }
             None => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 let mut new_files = list_all_files(client.clone(), &file.info.folder_id)
                     .await?
                     .into_iter()
@@ -479,6 +502,38 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
                 files.append(&mut new_files);
             }
         }
+    }
+    // restrict parallel downloading tasks
+    let sema = Arc::new(Semaphore::new(5));
+    let mut download_handles = Vec::new();
+    for (id, file) in files_to_download {
+        // wait for a while to avoid getting banned
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let DownloadInfo {
+            file_name,
+            url: FileDownloadUrl { url, .. },
+            ..
+        } = get_download_link(client.clone(), file.info.pick_code).await?;
+        let mut path = storge_path.clone();
+        path.push(file.path);
+        path.push(&file_name);
+        let sema = sema.clone();
+        let permit = sema
+            .acquire_owned()
+            .await
+            .expect("semaphore is not closed here");
+        download_handles.push(tokio::spawn(async move {
+            let _permit = permit;
+            download_file(&url, &path, id, file.info.size.unwrap()).await
+        }));
+    }
+    let download_errors = join_all(download_handles)
+        .await
+        .into_iter()
+        .filter_map(|result| result.expect("task is not cancelled or panicked").err())
+        .collect::<Vec<_>>();
+    if !download_errors.is_empty() {
+        return Err(CloudError::DownloadErrors(download_errors));
     }
     Ok(())
 }

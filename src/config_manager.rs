@@ -9,25 +9,28 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Notify, mpsc};
 
 pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::new(Arc::new(Config::new())));
-type MagnetLink = String;
-type RSSLink = String;
-type BangumiID = String;
-type BangumiName = String;
-type TimeStamp = String;
-type SubgroupID = String;
-type Keyword = String;
-type Hash = String;
-type AniName = String;
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Config {
-    pub bangumi: HashMap<BangumiID, TimeStamp>,
+    /// - `key`: bangumi ID
+    /// - `value`: last update time stamp
+    pub bangumi: HashMap<String, String>,
     pub cookies: String,
-    pub filter: HashMap<SubgroupID, Vec<Keyword>>,
-    pub hash_ani: HashMap<Hash, AniName>,
-    pub hash_ani_slow: HashMap<Hash, AniName>,
-    pub magnets: HashMap<BangumiName, Vec<MagnetLink>>,
-    pub rss_links: HashMap<BangumiName, RSSLink>,
+    /// - `key`: subgroup ID
+    /// - `value`: `Vec<Keyword>`
+    pub filter: HashMap<String, Vec<String>>,
+    /// - `key`: task hash
+    /// - `value`: anime name
+    pub hash_ani: HashMap<String, String>,
+    /// - `key`: task hash
+    /// - `value`: anime name
+    pub hash_ani_slow: HashMap<String, String>,
+    /// - `key`: bangumi name
+    /// - `value`: `Vec<MagnetLink>`
+    pub magnets: HashMap<String, Vec<String>>,
+    /// - `key`: bangumi name
+    /// - `value`: rss link
+    pub rss_links: HashMap<String, String>,
 }
 
 pub trait Remove<T> {
@@ -42,19 +45,15 @@ impl<T: PartialEq> Remove<T> for Vec<T> {
     }
 }
 
-/// # Panic
-/// If the receiver is guaranteed to be dropped after all senders,
-/// implementing this trait allows safe unwrapping without explicit `unwrap()`.
-///
-/// **Otherwise, it may panic!**
 pub trait SafeSend<T> {
     fn send_msg(&self, msg: T);
 }
 
 impl SafeSend<Message> for UnboundedSender<Message> {
     fn send_msg(&self, msg: Message) {
-        self.send(msg)
-            .expect("receiver is guaranteed to be dropped after all senders");
+        if let Err(_) = self.send(msg) {
+            eprintln!("receiver is guaranteed to be dropped after all senders");
+        }
     }
 }
 

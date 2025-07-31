@@ -1,13 +1,13 @@
 use std::{io, process::ExitCode};
 
 use bangumi_download::{
-    END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
+    BROADCAST_TX, END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
     main_proc::initialize,
-    socket_utils::{SocketMsg, SocketPath, SocketState, SocketStateDetect},
-    tui::app::App,
+    socket_utils::{SocketPath, SocketState, SocketStateDetect},
+    tui::{app::App, events::LEvent},
 };
 use futures::future::join3;
-use tokio::{signal, sync::broadcast};
+use tokio::signal;
 
 // we need to give the macro a var or let it use the global var
 // macro_rules! printf {
@@ -27,7 +27,7 @@ async fn main() -> ExitCode {
         let terminal = ratatui::init();
         let (mut app, rx, handles) = App::initialize(terminal, socket_path);
         let results = join3(
-            app.event_loop(rx),
+            LEvent::event_loop(&mut app, rx),
             handles.socket_handle,
             handles.ui_events_handle,
         )
@@ -40,10 +40,12 @@ async fn main() -> ExitCode {
             Ok(())
         };
         if let Err(e) = check_results() {
-            eprintln!("Error: {e}");
+            log::error!("Error: {e}");
             return ExitCode::FAILURE;
         }
+        return ExitCode::SUCCESS;
     } else {
+        let broadcast_rx = BROADCAST_TX.subscribe();
         let config_manager = initialize().await;
         let mut listener = match socket_path.initial_listener() {
             Ok(listener) => listener,
@@ -59,8 +61,6 @@ async fn main() -> ExitCode {
             }
         })
         .unwrap();
-        // I suppose the capacity is the count of messages
-        let (broadcast_tx, broadcast_rx) = broadcast::channel::<SocketMsg>(50);
         tokio::select! {
             _ = signal::ctrl_c() => {
                 println!("\nExiting...");
@@ -73,7 +73,7 @@ async fn main() -> ExitCode {
                 println!("dropped TX, waiting for config_manager to finish...");
                 config_manager.await.unwrap();
             },
-            _ = listener.listening(broadcast_tx, broadcast_rx) => {}
+            _ = listener.listening(BROADCAST_TX.clone(), broadcast_rx) => {}
         }
     }
     if ERROR_STATUS.load(std::sync::atomic::Ordering::Relaxed) {

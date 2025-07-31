@@ -352,6 +352,7 @@ pub async fn write_socket(
     while let Some(msg) = rx.recv().await {
         write.write_msg(msg).await?;
     }
+    println!("write msg to socket exit!");
     Ok(())
 }
 
@@ -359,11 +360,21 @@ pub async fn forward_socket_msg(
     tx: UnboundedSender<SocketMsg>,
     mut rx: broadcast::Receiver<SocketMsg>,
 ) {
-    while let Ok(msg) = rx.recv().await {
-        if let Err(_) = tx.send(msg) {
-            // log error
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                if let Err(e) = tx.send(msg) {
+                    // log error
+                    println!("forward msg exit due to an error: {e}!");
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("forward broadcast error: {e}");
+            }
         }
     }
+    println!("forward msg exit!");
 }
 
 pub async fn read_socket(
@@ -378,19 +389,29 @@ pub async fn read_socket(
         state: &mut Option<SyncInfo>,
     ) {
         match msg {
-            // no need to handle this
-            SocketMsg::Download(_) => (),
             SocketMsg::SyncQuery => {
+                println!("accept sync query!");
                 if let Some(state) = state.take() {
-                    if let Err(_) = tx.send(SocketMsg::SyncResp(state)) {
-                        // log error
-                    }
+                    tx.send_msg(SocketMsg::SyncResp(state))
                 }
             }
-            // no need to handle this
+            SocketMsg::DownloadFolder(cid) => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = download_a_folder(&cid, None).await {
+                        eprintln!("download a folder error: {e}");
+                        tx.send_msg(SocketMsg::Error(e.to_string()));
+                    } else {
+                        println!("successfully downloaded a folder");
+                    }
+                });
+            }
+            // no need to handle these messages
+            SocketMsg::Download(_) => (),
             SocketMsg::SyncResp(_) => (),
-            // no need to handle this
             SocketMsg::Null => (),
+            SocketMsg::Ok(_) => (),
+            SocketMsg::Error(_) => (),
         }
         // ADD_LINK => {
         // let rss_link = stream.read_str().await?;

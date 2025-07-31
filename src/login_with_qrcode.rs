@@ -1,7 +1,6 @@
-use qrcode::QrCode;
-use serde::{Deserialize, Serialize};
-
 use crate::errors::CloudError;
+use qrcode::{Color, QrCode};
+use serde::{Deserialize, Serialize};
 
 // const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];
 
@@ -99,13 +98,38 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
         time,
         sign,
     };
+    // println!("{}", qrcode);
     let code = QrCode::new(qrcode.as_bytes()).map_err(|e| format!("{e}"))?;
-    let code_string = code
-        .render::<char>()
-        .quiet_zone(false)
-        .module_dimensions(3, 1)
-        .build();
-    println!("{}", code_string);
+    let width = code.width();
+    let mut output = String::new();
+
+    // 每两个行压缩为一个字符（上下两个像素 -> ▀、▄、█、空格）
+    for y in (0..width).step_by(2) {
+        for x in 0..width {
+            let top = code[(x, y)] == Color::Dark;
+            let bottom = if y + 1 < width {
+                code[(x, y + 1)] == Color::Dark
+            } else {
+                false
+            };
+            let ch = match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            };
+            output.push(ch);
+        }
+        output.push('\n');
+    }
+    // let code_string = code
+    //     .render::<char>()
+    //     // .dark_color(Rgb([0, 0, 128]))
+    //     // .light_color(Rgb([224, 224, 224])) // adjust colors
+    //     .quiet_zone(false) // disable quiet zone (white border)
+    //     .min_dimensions(1, 1)
+    //     .build();
+    println!("{}", output);
     loop {
         match get_qrcode_status(client.clone(), &query).await {
             Ok(status) => match status.status {

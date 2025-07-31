@@ -7,9 +7,7 @@ edition = "2024"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [dependencies]
-clap = { version = "4.5.38", features = ["derive"] }
 futures = "0.3.31"
-indicatif = "0.17.11"
 once_cell = "1.21.1"
 qrcode = "0.14.1"
 quick-xml = { version = "0.37.2", features = ["serialize"] }
@@ -31,3 +29,6 @@ base64 = "0.22.1"
 thiserror = "2.0.12"
 ratatui = "0.29.0"
 bincode = "2.0.1"
+uuid = { version = "1.17.0", features = ["v7"] }
+log = "0.4.27"
+tui-logger = "0.17.3"
