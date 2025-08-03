@@ -6,7 +6,7 @@ use crate::{
     socket_utils::{DownloadState, SocketMsg},
     tui::{
         app::{App, ListState},
-        progress_bar::{Inc, ProgressBar},
+        progress_bar::{BasicBar, SimpleBar},
         ui::{self, CurrentScreen, InputState, Popup},
     },
 };
@@ -40,7 +40,6 @@ impl LEvent {
                     ui::render(app)?;
                 }
                 LEvent::Socket(msg) => {
-                    // TODO: change to a more efficient way
                     // deal with socket message here
                     match msg {
                         SocketMsg::Download(msg) => match msg.state {
@@ -51,39 +50,53 @@ impl LEvent {
                                     msg.id,
                                     size
                                 );
-                                let bar = ProgressBar::new(name, msg.id, size);
-                                app.downloading_state.progresses.push(bar);
+                                let bar = SimpleBar::new(name, size);
+                                app.downloading_state.progress_suit.add(msg.id, bar);
                             }
-                            DownloadState::Downloading(delta) => {
-                                app.count += 1;
-                                // log::trace!("current msg count: {}", app.count);
-                                for progress in &mut app.downloading_state.progresses {
-                                    if progress.id() == msg.id {
-                                        progress.inc(delta);
-                                        break;
-                                    }
-                                }
-                            }
+                            DownloadState::Downloading(_) => (),
                             DownloadState::Finished => {
                                 log::trace!(
                                     "received a socket download finish msg, id: {}",
                                     msg.id
                                 );
-                                for progress in &mut app.downloading_state.progresses {
-                                    if progress.id() == msg.id {
-                                        progress.inc_to_finished();
-                                        break;
-                                    }
+                                if let Some(bar) =
+                                    app.downloading_state.progress_suit.get_bar_mut(msg.id)
+                                {
+                                    bar.inc_to_finished();
+                                } else {
+                                    log::error!(
+                                        "received a finished msg, but can not find its progress bar"
+                                    );
+                                    app.socket_tx.send_msg(SocketMsg::SyncQuery);
                                 }
                             }
                         },
+                        SocketMsg::DownloadSync(state) => {
+                            // log::trace!("received a socket download sync msg");
+                            let mut is_lossy = false;
+                            for s in &state {
+                                if let Some(bar) =
+                                    app.downloading_state.progress_suit.get_bar_mut(s.id)
+                                {
+                                    bar.set_current_size(s.current_size);
+                                    bar.set_current_speed(s.current_speed);
+                                } else {
+                                    log::error!(
+                                        "received a sync msg, but can not find its progress bar"
+                                    );
+                                    is_lossy = true;
+                                }
+                            }
+                            // maybe we should not be too strict
+                            // if is_lossy || state.len() != app.downloading_state.progress_suit.len()
+                            // {
+                            if is_lossy {
+                                log::error!("send SyncQuery because of DownloadSync");
+                                app.socket_tx.send_msg(SocketMsg::SyncQuery);
+                            }
+                        }
                         SocketMsg::SyncResp(info) => {
-                            let progresses = info
-                                .progresses
-                                .into_iter()
-                                .map(|bar| bar.to_progress_bar())
-                                .collect::<Vec<_>>();
-                            app.downloading_state.progresses = progresses;
+                            app.downloading_state.progress_suit = info.progresses;
                         }
                         SocketMsg::Ok(info) => {
                             log::info!("{}", info);
@@ -200,7 +213,7 @@ impl LEvent {
             }
             KeyCode::Down => {
                 let scroll_down = |state: &mut ListState| {
-                    if state.offset + 1 < state.progresses.len() {
+                    if state.offset + 1 < state.progress_suit.len() {
                         state.offset += 1;
                         state.scroll_state = state.scroll_state.position(state.offset);
                     }

@@ -8,7 +8,7 @@ use tokio::{
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
     select,
     sync::{
-        Notify, Semaphore, broadcast,
+        Notify, Semaphore,
         mpsc::{UnboundedReceiver, UnboundedSender},
     },
     task::JoinHandle,
@@ -19,7 +19,7 @@ use crate::{
     cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
     config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
     errors::{CatError, CloudError, DownloadError},
-    socket_utils::{ReadSocketMsg, SocketMsg, SyncInfo, WriteSocketMsg},
+    socket_utils::{ReadSocketMsg, SocketMsg, WriteSocketMsg},
     update_rss::start_rss_receive,
 };
 
@@ -352,100 +352,32 @@ pub async fn write_socket(
     while let Some(msg) = rx.recv().await {
         write.write_msg(msg).await?;
     }
+    // TODO: exit earlier
     println!("write msg to socket exit!");
     Ok(())
 }
 
-pub async fn forward_socket_msg(
-    tx: UnboundedSender<SocketMsg>,
-    mut rx: broadcast::Receiver<SocketMsg>,
-) {
-    loop {
-        match rx.recv().await {
-            Ok(msg) => {
-                if let Err(e) = tx.send(msg) {
-                    // log error
-                    println!("forward msg exit due to an error: {e}!");
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("forward broadcast error: {e}");
-            }
+impl SafeSend<(u128, SocketMsg)> for UnboundedSender<(u128, SocketMsg)> {
+    fn send_msg(&self, msg: (u128, SocketMsg)) {
+        if let Err(e) = self.send(msg) {
+            // log error
+            eprintln!(
+                "Error occured when sending msg to global msg handler: {}",
+                e
+            );
         }
     }
-    println!("forward msg exit!");
 }
 
 pub async fn read_socket(
-    tx: UnboundedSender<SocketMsg>,
-    state: SyncInfo,
+    id: u128,
+    tx: UnboundedSender<(u128, SocketMsg)>,
     mut read: OwnedReadHalf,
 ) -> io::Result<()> {
-    let mut state = Some(state);
-    async fn handle_msg(
-        msg: SocketMsg,
-        tx: &UnboundedSender<SocketMsg>,
-        state: &mut Option<SyncInfo>,
-    ) {
-        match msg {
-            SocketMsg::SyncQuery => {
-                println!("accept sync query!");
-                if let Some(state) = state.take() {
-                    tx.send_msg(SocketMsg::SyncResp(state))
-                }
-            }
-            SocketMsg::DownloadFolder(cid) => {
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = download_a_folder(&cid, None).await {
-                        eprintln!("download a folder error: {e}");
-                        tx.send_msg(SocketMsg::Error(e.to_string()));
-                    } else {
-                        println!("successfully downloaded a folder");
-                    }
-                });
-            }
-            // no need to handle these messages
-            SocketMsg::Download(_) => (),
-            SocketMsg::SyncResp(_) => (),
-            SocketMsg::Null => (),
-            SocketMsg::Ok(_) => (),
-            SocketMsg::Error(_) => (),
-        }
-        // ADD_LINK => {
-        // let rss_link = stream.read_str().await?;
-        // let client = CLIENT_WITH_RETRY.clone();
-        // match check_rss_link(&rss_link, client).await {
-        //     Ok(()) => {
-        // let temp_tx = TX.load();
-        // let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
-        // let old_config = CONFIG.load_full();
-        // let rss_update = async || -> Result<(), CatError> {
-        //     rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
-        // .await?;
-        //     restart_refresh_download().await?;
-        //     restart_refresh_download_slow().await?;
-        //     Ok(())
-        // };
-        // if let Err(e) = rss_update().await {
-        //     eprintln!("add link error: {e}");
-        // }
-        //     }
-        //     Err(error) => stream.write_str(&error).await?,
-        // }
-        //     }
-        //     DOWNLOAD_FOLDER => {
-        // let cid = stream.read_str().await?;
-        // if let Err(e) = download_a_folder(&cid, None).await {
-        //     stream.write_str(&e.to_string()).await?;
-        // }
-        //     }
-    }
     loop {
         select! {
             result = read.read_msg() => {
-                handle_msg(result?, &tx, &mut state).await;
+                tx.send_msg((id, result?));
             }
             _ = END_NOTIFY.notified() => {break;}
         }

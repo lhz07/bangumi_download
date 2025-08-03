@@ -1,7 +1,10 @@
-use crate::tui::{app::App, progress_bar::SpeedSum, qrcode_widget};
+use crate::tui::{
+    app::App,
+    progress_bar::{BasicBar, SpeedSum},
+    qrcode_widget,
+};
 use std::io;
 
-use crate::tui::progress_bar::Inc;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style, Styled},
@@ -42,7 +45,7 @@ impl InputState {
 
 pub fn render(app: &mut App) -> io::Result<()> {
     app.terminal.draw(|f| {
-        let downloading_tasks = app.downloading_state.progresses.len();
+        let downloading_tasks = app.downloading_state.progress_suit.len();
         let downloading_tab = if downloading_tasks > 0 {
             format!("Downloading ({})", downloading_tasks)
         } else {
@@ -62,8 +65,8 @@ pub fn render(app: &mut App) -> io::Result<()> {
 
         if app.current_screen != CurrentScreen::Downloading {
             app.downloading_state
-                .progresses
-                .retain(|p| p.size() != p.current_size());
+                .progress_suit
+                .retain(|p| !p.is_finished());
         }
 
         match app.current_screen {
@@ -137,16 +140,15 @@ pub fn render(app: &mut App) -> io::Result<()> {
                     Layout::vertical([Constraint::Length(2), Constraint::Fill(1)])
                         .split(horizontal_layout[0]);
                 let download_status_area = vertical_layout[0];
-                let speed_sum = (state.progresses.speed() as f64 / 1000000.0 + 0.5) as u64;
                 let line = Line::raw(format!(
-                    "Downloading task(s): {}       Speed: {} MB/s",
-                    state.progresses.len(),
-                    speed_sum
+                    "Downloading task(s): {}       Speed: {}/s",
+                    state.progress_suit.len(),
+                    state.progress_suit.speed()
                 ));
                 f.render_widget(line, download_status_area);
                 let progresses_area = vertical_layout[1];
                 let scroll_bar_area = horizontal_layout[1];
-                let height = main_layout[1].height as usize;
+                let height = vertical_layout[1].height as usize;
                 // 每个进度条占用 3 行：上下边框 + 内容
                 let per_item_height = 3;
                 // 可视的进度条个数
@@ -154,11 +156,11 @@ pub fn render(app: &mut App) -> io::Result<()> {
                 // 计算可见区间
                 state.offset = state
                     .offset
-                    .min(state.progresses.len().saturating_sub(visible_count));
-                let end = (state.offset + visible_count).min(state.progresses.len());
+                    .min(state.progress_suit.len().saturating_sub(visible_count));
+                let end = (state.offset + visible_count).min(state.progress_suit.len());
                 state.scroll_state = state
                     .scroll_state
-                    .content_length(state.progresses.len().saturating_sub(visible_count));
+                    .content_length(state.progress_suit.len().saturating_sub(visible_count));
                 // 为每个进度条生成一个长度为 per_item_height 的约束
                 let constraints =
                     vec![Constraint::Length(per_item_height as u16); end - state.offset];
@@ -168,22 +170,19 @@ pub fn render(app: &mut App) -> io::Result<()> {
                     .split(progresses_area);
                 let mut chunks_iter = chunks.iter();
                 let mut j = 0;
-                state.progresses.retain_mut(|p| {
+                state.progress_suit.retain_mut(|p| {
                     let percent = p.pos();
-                    let speed = (p.calculate_speed() as f64 / 1000000.0 + 0.5) as u64;
-                    let current_size = (p.current_size() as f64 / 1000000.0 + 0.5) as u64;
-                    let size = (p.size() as f64 / 1000000.0 + 0.5) as u64;
                     if j >= state.offset
                         && j < end
                         && let Some(chunk) = chunks_iter.next()
                     {
                         let gauge = Gauge::default()
                             .block(Block::default().borders(Borders::ALL).title(format!(
-                                "{} {} MB / {} MB   {} MB/s",
+                                "{} {} / {}   {}/s",
                                 p.name(),
-                                current_size,
-                                size,
-                                speed
+                                p.current_size_format(),
+                                p.size_format(),
+                                p.current_speed()
                             )))
                             .gauge_style(
                                 Style::default()
@@ -194,7 +193,10 @@ pub fn render(app: &mut App) -> io::Result<()> {
                         f.render_widget(gauge, *chunk);
                     }
                     j += 1;
-                    percent != 100
+                    // we should use accurate data here, instead of using percent.
+                    // percent is not accurate, when its true percent is almost 100%, it will show as 100%,
+                    // but removing the bar at that time is too early
+                    !p.is_finished()
                 });
                 f.render_stateful_widget(
                     Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -210,7 +212,6 @@ pub fn render(app: &mut App) -> io::Result<()> {
                     .block(Block::default().title("Logs").borders(Borders::ALL))
                     .state(&app.log_widget_state);
                 f.render_widget(logs, main_layout[1]);
-                // f.render_stateful_widget(logs, main_layout[1], &mut app.log_widget_state);
             }
         }
     })?;

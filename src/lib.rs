@@ -19,9 +19,12 @@ use once_cell::sync::Lazy;
 use reqwest::Proxy;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
-use std::{sync::atomic::AtomicBool, time::Duration};
+use std::{mem::ManuallyDrop, sync::atomic::AtomicBool, time::Duration};
 use tokio::{
-    sync::{Mutex, Notify, Semaphore, broadcast, mpsc::UnboundedSender},
+    sync::{
+        Mutex, Notify, Semaphore,
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    },
     task::JoinHandle,
 };
 
@@ -87,8 +90,13 @@ pub static CLIENT_PROXY: Lazy<ClientWithMiddleware> = Lazy::new(|| {
 pub static TX: Lazy<ArcSwapOption<UnboundedSender<Message>>> =
     Lazy::new(|| ArcSwapOption::new(None));
 // I suppose the capacity is the count of messages
-pub static BROADCAST_TX: Lazy<broadcast::Sender<SocketMsg>> =
-    Lazy::new(|| broadcast::Sender::new(1000));
+pub static BROADCAST_TX: Lazy<UnboundedSender<SocketMsg>> = Lazy::new(|| {
+    let (tx, rx) = unbounded_channel::<SocketMsg>();
+    let rx = Box::new(ManuallyDrop::new(rx));
+    unsafe { BROADCAST_RX = Box::leak(rx) }
+    tx
+});
+pub static mut BROADCAST_RX: *mut ManuallyDrop<UnboundedReceiver<SocketMsg>> = std::ptr::null_mut();
 pub static ERROR_STATUS: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 pub static REFRESH_DOWNLOAD: Lazy<Mutex<Option<JoinHandle<Result<(), CatError>>>>> =
     Lazy::new(|| Mutex::new(None));

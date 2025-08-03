@@ -1,26 +1,30 @@
 use bincode::{Decode, Encode};
-use futures::future::join3;
+use std::collections::HashMap;
 use std::mem::ManuallyDrop;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::path::Path;
 use std::time::Duration;
 use std::{env::temp_dir, fs, path::PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::unix::SocketAddr;
 use tokio::select;
-use tokio::sync::broadcast;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 use tokio::{
     io::{self, AsyncReadExt},
     net::UnixListener,
 };
+use uuid::Uuid;
 
+use crate::END_NOTIFY;
+use crate::cloud_manager::download_a_folder;
 use crate::config_manager::SafeSend;
-use crate::errors::{CatError, SocketError};
-use crate::tui::progress_bar::{Inc, SimpleBar};
-use crate::{END_NOTIFY, main_proc};
+use crate::errors::SocketError;
+use crate::main_proc::{read_socket, write_socket};
+use crate::tui::progress_bar::{
+    BasicBar, Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar,
+};
 
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
@@ -87,8 +91,8 @@ impl SocketPath {
         Ok(listener)
     }
 
-    pub async fn to_stream(&self) -> Result<SocketStream, io::Error> {
-        SocketStream::connect_stream(&self.path).await
+    pub async fn to_stream(&self) -> Result<UnixStream, io::Error> {
+        UnixStream::connect(&self.path).await
     }
 }
 
@@ -98,78 +102,13 @@ impl SocketStateDetect for SocketPath {
     }
 }
 
-// SocketStream ------------------------------------------------
-pub struct SocketStream {
-    stream: UnixStream,
-}
-
-impl SocketStream {
-    pub async fn connect_stream<P>(path: P) -> Result<Self, io::Error>
-    where
-        P: AsRef<Path>,
-    {
-        let stream = UnixStream::connect(path).await?;
-        Ok(Self { stream })
-    }
-
-    pub fn new(stream: UnixStream) -> Self {
-        Self { stream }
-    }
-
-    pub fn split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        self.stream.into_split()
-    }
-
-    async fn handle_stream(
-        stream: SocketStream,
-        state: SyncInfo,
-        rx: broadcast::Receiver<SocketMsg>,
-    ) -> Result<(), CatError> {
-        // here we should pass the SocketMsg received from rx transparently
-        // we need to use another channel, because `OwnedWriteHalf` needs mut to use `write_all`,
-        // which means we should use a lock or a channel.
-        let (read, write) = stream.split();
-
-        let (socket_tx, socket_rx) = unbounded_channel::<SocketMsg>();
-        let (read_result, write_result, _) = join3(
-            main_proc::read_socket(socket_tx.clone(), state, read),
-            main_proc::write_socket(socket_rx, write),
-            main_proc::forward_socket_msg(socket_tx, rx),
-        )
-        .await;
-        read_result?;
-        write_result?;
-        Ok(())
-    }
-}
-
-impl Deref for SocketStream {
-    type Target = UnixStream;
-    fn deref(&self) -> &Self::Target {
-        &self.stream
-    }
-}
-
-impl DerefMut for SocketStream {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.stream
-    }
-}
-
-impl SafeSend<SocketMsg> for broadcast::Sender<SocketMsg> {
-    fn send_msg(&self, msg: SocketMsg) {
-        if let Err(e) = self.send(msg) {
-            // log error
-            eprintln!("Error occured when sending msg: {}", e);
-        }
-    }
-}
-
 // SocketListener ------------------------------------------------
 pub struct SocketListener {
     listener: ManuallyDrop<UnixListener>,
+    stream_read_tx: UnboundedSender<(u128, SocketMsg)>,
+    stream_write_txs: HashMap<u128, UnboundedSender<SocketMsg>>,
     path: PathBuf,
-    state: SyncInfo,
+    state: ProgressSuit<ProgressBar>,
 }
 
 impl SocketListener {
@@ -178,126 +117,225 @@ impl SocketListener {
         P: AsRef<Path>,
     {
         let listener = ManuallyDrop::new(UnixListener::bind(&path)?);
-        let state = SyncInfo {
-            progresses: Vec::new(),
-        };
+        let (stream_read_tx, _) = unbounded_channel::<(u128, SocketMsg)>();
         Ok(Self {
             listener,
+            stream_read_tx,
+            stream_write_txs: HashMap::new(),
             path: path.as_ref().to_path_buf(),
-            state,
+            state: ProgressSuit::new(),
         })
     }
-    async fn accept_stream(&self, tx: &broadcast::Sender<SocketMsg>) {
-        match self.listener.accept().await {
+    async fn accept_stream(&mut self, accept_result: io::Result<(UnixStream, SocketAddr)>) {
+        match accept_result {
             Ok((stream, _)) => {
-                let rx = tx.subscribe();
-                let state = self.state.clone();
-                let stream = SocketStream::new(stream);
-
-                tokio::spawn(async move {
-                    if let Err(e) = SocketStream::handle_stream(stream, state, rx).await {
-                        eprintln!("handle stream error: {}", e);
-                    }
-                });
+                // we need to use another channel, because `OwnedWriteHalf` needs mut to use `write_all`,
+                // which means we should use a lock or a channel.
+                let (read, write) = stream.into_split();
+                let id = Uuid::now_v7().as_u128();
+                let (write_tx, write_rx) = unbounded_channel::<SocketMsg>();
+                tokio::spawn(read_socket(id, self.stream_read_tx.clone(), read));
+                tokio::spawn(write_socket(write_rx, write));
+                self.stream_write_txs.insert(id, write_tx);
             }
             Err(err) => eprintln!("Error: {}", err),
         }
     }
-    async fn handle_msg_and_broadcast(
-        &mut self,
-        first_msg: SocketMsg,
-        tx: UnboundedSender<SocketMsg>,
-        mut rx: UnboundedReceiver<SocketMsg>,
-    ) {
-        let mut batch = vec![first_msg];
-        let mut last_send = Instant::now();
-
-        //
-        let interval = Duration::from_millis(50);
-        let timeout = Duration::from_millis(100);
-        let deadline = tokio::time::sleep(timeout);
-
-        tokio::pin!(deadline);
-
-        loop {
-            tokio::select! {
-                // 非阻塞收更多消息
-                Some(msg) = rx.recv() => {
-                    // batch.push(msg);
-                    // change the state here
-                    // if the msg is instant msg, forward it, send current state, and reset the timer
-                    // else:
-                    if last_send.elapsed() >= interval {
-                        // send_batch(&batch);
-                        // send state here
-                        batch.clear();
-                        last_send = Instant::now();
-                        // 重置 deadline
-                        deadline.as_mut().reset(Instant::now() + timeout);
-                    }
+    fn broadcast(&mut self, msg: SocketMsg) {
+        let mut error_key = Vec::new();
+        if let [other @ .., (last_key, last_tx)] =
+            self.stream_write_txs.iter().collect::<Vec<_>>().as_slice()
+        {
+            for (i, tx) in other {
+                if let Err(e) = tx.send(msg.clone()) {
+                    eprintln!("stream write error: {}", e);
+                    error_key.push(**i);
                 }
+            }
+            if let Err(e) = last_tx.send(msg) {
+                eprintln!("stream write error: {}", e);
+                error_key.push(**last_key);
+            }
 
-                // 最长 100ms，触发强制发送
-                _ = &mut deadline => {
-                    if !batch.is_empty() {
-                        // send_batch(&batch);
-                    }
-                    return; // 处理结束，回到外层休眠
-                }
+            for i in error_key {
+                self.stream_write_txs.remove(&i);
             }
         }
     }
 
-    /// - `bool`: is instant
-    async fn receive_broadcast(
+    async fn handle_msg_and_broadcast(
         &mut self,
-        recv_result: Result<SocketMsg, broadcast::error::RecvError>,
-    ) -> bool {
-        // here, we handle the original socket messages, and update state with them.
-        // TODO: estimate speed here instead of in client
-        // TODO: replace `broadcast` with `UnboundedChannel`
-        let mut is_instant = true;
-        match recv_result {
-            Ok(msg) => match msg {
-                SocketMsg::Download(msg) => match msg.state {
-                    DownloadState::Start((name, size)) => {
-                        let simple_bar = SimpleBar::new(name, msg.id, size);
-                        self.state.progresses.push(simple_bar);
-                    }
-                    DownloadState::Downloading(delta) => {
-                        for progress in &mut self.state.progresses {
-                            if progress.id() == msg.id {
-                                progress.inc(delta);
-                                break;
-                            }
-                        }
-                        is_instant = false;
-                    }
-                    DownloadState::Finished => {
-                        self.state
-                            .progresses
-                            .retain(|progress| progress.id() != msg.id);
-                    }
-                },
-                _ => (),
-            },
-            Err(e) => {
-                eprintln!("receive broadcast error: {e}");
-            }
+        first_msg: SocketMsg,
+        last_send: &mut Instant,
+        unhandle_latest: &mut bool,
+        interval: &Duration,
+        timeout: &Duration,
+        deadline: &mut OneShotSleep,
+    ) {
+        // change the state here
+        // if the msg is instant msg, forward it, and return.
+        // a instant msg means that the state is in sync, there is no need
+        // to send the state again
+        if let Some(msg) = self.receive_broadcast(first_msg).await {
+            self.broadcast(msg);
+            return;
         }
-        is_instant
+        if !self.state.is_empty() && last_send.elapsed() >= *interval {
+            // send state here
+            let state = self.state.state();
+            self.broadcast(SocketMsg::DownloadSync(state));
+            *last_send = Instant::now();
+            // reset deadline
+            deadline.set_duration(*timeout);
+            *unhandle_latest = false;
+        } else {
+            *unhandle_latest = true;
+        }
+    }
+
+    async fn receive_broadcast(&mut self, msg: SocketMsg) -> Option<SocketMsg> {
+        // here, we handle the original socket messages, and update state with them.
+
+        match msg {
+            SocketMsg::Download(ref download_msg) => match download_msg.state {
+                DownloadState::Start((ref name, size)) => {
+                    let bar = ProgressBar::new(name.clone(), size);
+                    self.state.add(download_msg.id, bar);
+                    Some(msg)
+                }
+                DownloadState::Downloading(delta) => {
+                    if let Some(bar) = self.state.get_bar_mut(download_msg.id) {
+                        bar.inc(delta);
+                        if bar.is_finished() {
+                            println!("remove the bar as it is finished");
+                            self.state.remove(download_msg.id);
+                            let msg = SocketMsg::Download(DownloadMsg {
+                                id: download_msg.id,
+                                state: DownloadState::Finished,
+                            });
+                            return Some(msg);
+                        }
+                    }
+                    None
+                }
+                DownloadState::Finished => {
+                    if self.state.remove(download_msg.id).is_some() {
+                        Some(msg)
+                    } else {
+                        None
+                    }
+                }
+            },
+            _ => Some(msg),
+        }
+    }
+
+    async fn handle_stream_msg(&mut self, stream_msg: (u128, SocketMsg)) {
+        let (id, msg) = stream_msg;
+        match msg {
+            SocketMsg::SyncQuery => {
+                println!("accept sync query!");
+                if let Some(tx) = self.stream_write_txs.get(&id) {
+                    let progresses = self.state.clone().to_simple_bars();
+                    tx.send_msg(SocketMsg::SyncResp(SyncInfo { progresses }));
+                } else {
+                    eprintln!("stream write tx is closed");
+                    return;
+                };
+            }
+            SocketMsg::DownloadFolder(cid) => {
+                let tx = if let Some(tx) = self.stream_write_txs.get(&id) {
+                    tx.clone()
+                } else {
+                    eprintln!("stream write tx is closed");
+                    return;
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = download_a_folder(&cid, None).await {
+                        eprintln!("download a folder error: {e}");
+                        tx.send_msg(SocketMsg::Error(e.to_string()));
+                    } else {
+                        println!("successfully downloaded a folder");
+                    }
+                });
+            }
+            // no need to handle these messages
+            SocketMsg::DownloadSync(_) => (),
+            SocketMsg::Download(_) => (),
+            SocketMsg::SyncResp(_) => (),
+            SocketMsg::Null => (),
+            SocketMsg::Ok(_) => (),
+            SocketMsg::Error(_) => (),
+            // async fn handle_msg(msg: SocketMsg, tx: &UnboundedSender<SocketMsg>) {
+            // ADD_LINK => {
+            // let rss_link = stream.read_str().await?;
+            // let client = CLIENT_WITH_RETRY.clone();
+            // match check_rss_link(&rss_link, client).await {
+            //     Ok(()) => {
+            // let temp_tx = TX.load();
+            // let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
+            // let old_config = CONFIG.load_full();
+            // let rss_update = async || -> Result<(), CatError> {
+            //     rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
+            // .await?;
+            //     restart_refresh_download().await?;
+            //     restart_refresh_download_slow().await?;
+            //     Ok(())
+            // };
+            // if let Err(e) = rss_update().await {
+            //     eprintln!("add link error: {e}");
+            // }
+            //     }
+            //     Err(error) => stream.write_str(&error).await?,
+            // }
+            //     }
+            //     DOWNLOAD_FOLDER => {
+            // let cid = stream.read_str().await?;
+            // if let Err(e) = download_a_folder(&cid, None).await {
+            //     stream.write_str(&e.to_string()).await?;
+            // }
+            //     }
+            // }
+        }
     }
 
     pub async fn listening(
         &mut self,
-        tx: broadcast::Sender<SocketMsg>,
-        mut rx: broadcast::Receiver<SocketMsg>,
+        mut rx: UnboundedReceiver<SocketMsg>,
+        stream_read_tx: UnboundedSender<(u128, SocketMsg)>,
+        mut stream_read_rx: UnboundedReceiver<(u128, SocketMsg)>,
     ) {
+        // replace the default tx
+        self.stream_read_tx = stream_read_tx;
+        let mut last_send = Instant::now();
+
+        let mut unhandle_latest = false;
+        // internal: time internal between sending messages
+        let interval = Duration::from_millis(70);
+        let timeout = Duration::from_millis(100);
+        let mut deadline = OneShotSleep::new();
         loop {
             select! {
-                _ = self.accept_stream(&tx) => {}
-                recv_result = rx.recv() => {
-                    self.receive_broadcast(recv_result).await;
+                stream_msg = stream_read_rx.recv() => {
+                    if let Some(msg) = stream_msg{
+                        self.handle_stream_msg(msg).await;
+                    }
+                }
+                accept_result = self.listener.accept() => {
+                    self.accept_stream(accept_result).await;
+                }
+                Some(msg) = rx.recv() => {
+                    self.handle_msg_and_broadcast(msg, &mut last_send, &mut unhandle_latest, &interval, &timeout, &mut deadline).await;
+                }
+                // send the unsend msg
+                _ = deadline.wait() => {
+                    println!("deadline reached!");
+                    if !self.state.is_empty() && unhandle_latest{
+                        // send state
+                        let state = self.state.state();
+                        self.broadcast(SocketMsg::DownloadSync(state));
+                        unhandle_latest = false;
+                    }
                 }
                 _ = END_NOTIFY.notified() => {}
             }
@@ -320,6 +358,7 @@ impl SocketStateDetect for SocketListener {
 
 impl Drop for SocketListener {
     fn drop(&mut self) {
+        // we should drop the listener first, then the socket may be discarded
         unsafe { ManuallyDrop::drop(&mut self.listener) };
         let state = self.try_connect();
         if let SocketState::Discarded = state {
@@ -382,6 +421,66 @@ impl<T: AsyncReadExt + std::marker::Unpin + std::marker::Send> ReadSocketMsg for
     }
 }
 
+// pub struct OneShotSleep1 {
+//     notify: Notify,
+//     duration: Mutex<Option<Duration>>,
+// }
+
+// impl OneShotSleep1 {
+//     pub fn new() -> Self {
+//         let notify = Notify::new();
+//         let duration = Mutex::new(None);
+//         Self { notify, duration }
+//     }
+
+//     /// set sleep duration
+//     pub fn set_duration(&self, dur: Duration) {
+//         let mut guard = self.duration.lock().unwrap();
+//         *guard = Some(dur);
+//         drop(guard);
+//         self.notify.notify_waiters();
+//     }
+
+//     /// wait for a wake
+//     pub async fn wait(&self) {
+//         let mut guard = self.duration.lock().unwrap();
+//         if let Some(dur) = guard.take() {
+//             drop(guard);
+//             tokio::time::sleep(dur).await;
+//             return;
+//         }
+//         drop(guard);
+//         // wait for new sleep duration
+//         self.notify.notified().await;
+//     }
+// }
+
+pub struct OneShotSleep {
+    duration: Option<Duration>,
+}
+
+impl OneShotSleep {
+    pub fn new() -> Self {
+        let duration = None;
+        OneShotSleep { duration }
+    }
+
+    /// set sleep duration
+    pub fn set_duration(&mut self, dur: Duration) {
+        self.duration = Some(dur);
+    }
+
+    /// wait forever or sleep for a duration
+    pub async fn wait(&mut self) {
+        if let Some(dur) = self.duration.take() {
+            tokio::time::sleep(dur).await;
+            return;
+        }
+        // wait forever
+        futures::future::pending::<()>().await;
+    }
+}
+
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum SocketMsg {
     Download(DownloadMsg),
@@ -389,6 +488,7 @@ pub enum SocketMsg {
     DownloadFolder(String),
     Ok(String),
     Error(String),
+    DownloadSync(Vec<ProgressState>),
     SyncQuery,
     SyncResp(SyncInfo),
     Null,
@@ -413,5 +513,5 @@ pub enum DownloadState {
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct SyncInfo {
-    pub progresses: Vec<SimpleBar>,
+    pub progresses: ProgressSuit<SimpleBar>,
 }

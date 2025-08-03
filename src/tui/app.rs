@@ -6,7 +6,7 @@ use crate::{
     socket_utils::{ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg},
     tui::{
         events::LEvent,
-        progress_bar::ProgressBar,
+        progress_bar::{ProgressSuit, SimpleBar},
         ui::{CurrentScreen, InputState, Popup},
     },
 };
@@ -40,11 +40,20 @@ impl SafeSend<LEvent> for UnboundedSender<LEvent> {
     }
 }
 
-#[derive(Clone)]
 pub struct ListState {
     pub(crate) offset: usize,
     pub(crate) scroll_state: ScrollbarState,
-    pub(crate) progresses: Vec<ProgressBar>,
+    pub(crate) progress_suit: ProgressSuit<SimpleBar>,
+}
+
+impl ListState {
+    pub fn new() -> Self {
+        ListState {
+            offset: 0,
+            scroll_state: ScrollbarState::new(0),
+            progress_suit: ProgressSuit::new(),
+        }
+    }
 }
 
 pub struct Handles {
@@ -61,7 +70,6 @@ pub struct App {
     pub(crate) finished_state: ListState,
     pub(crate) log_widget_state: TuiWidgetState,
     pub(crate) socket_tx: UnboundedSender<SocketMsg>,
-    pub(crate) count: u64,
 }
 
 impl App {
@@ -77,12 +85,8 @@ impl App {
         for i in 1..50 {
             log::info!("{i}");
         }
-        let downloading_state = ListState {
-            offset: 0,
-            scroll_state: ScrollbarState::new(0),
-            progresses: Vec::new(),
-        };
-        let finished_state = downloading_state.clone();
+        let downloading_state = ListState::new();
+        let finished_state = ListState::new();
         // the event loop chanel
         let (event_tx, event_rx) = unbounded_channel::<LEvent>();
         // the socket channel
@@ -107,7 +111,6 @@ impl App {
             finished_state,
             socket_tx,
             log_widget_state,
-            count: 0,
         };
         app.socket_tx.send_msg(SocketMsg::SyncQuery);
         (app, event_rx, handles)
@@ -132,7 +135,7 @@ impl App {
         socket_path: SocketPath,
     ) -> io::Result<()> {
         let stream = socket_path.to_stream().await?;
-        let (read, write) = stream.split();
+        let (read, write) = stream.into_split();
         let (read_result, write_result) = join(
             Self::read_socket(tx.clone(), read),
             Self::write_socket(rx, write),
@@ -164,6 +167,7 @@ impl App {
             select! {
                 recv_result = rx.recv() => {
                     if let Some(msg) = recv_result {
+                        log::trace!("write msg: {:?}", msg);
                         write.write_msg(msg).await?;
                     }
                 }

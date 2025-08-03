@@ -6,8 +6,7 @@ use crate::{
     cloud_manager::{download_a_folder, get_file_info, list_all_files, list_files},
     config_manager::Config,
     socket_utils::{
-        DownloadMsg, DownloadState, ReadSocketMsg, SocketMsg, SocketPath, SocketStream,
-        WriteSocketMsg,
+        DownloadMsg, DownloadState, ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg,
     },
 };
 use config_manager::*;
@@ -603,8 +602,7 @@ async fn test_bincode() {
     });
     let listener_handle = tokio::spawn(async move {
         let listener = listener_path.to_listener().unwrap();
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut stream = SocketStream::new(stream);
+        let (mut stream, _) = listener.accept().await.unwrap();
         let msg = stream.read_msg().await.unwrap();
         println!("{:?}", msg);
         drop(listener);

@@ -1,13 +1,13 @@
-use std::{io, process::ExitCode};
+use std::{io, mem::ManuallyDrop, process::ExitCode};
 
 use bangumi_download::{
-    BROADCAST_TX, END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
+    BROADCAST_RX, BROADCAST_TX, END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
     main_proc::initialize,
-    socket_utils::{SocketPath, SocketState, SocketStateDetect},
+    socket_utils::{SocketMsg, SocketPath, SocketState, SocketStateDetect},
     tui::{app::App, events::LEvent},
 };
 use futures::future::join3;
-use tokio::signal;
+use tokio::{signal, sync::mpsc::unbounded_channel};
 
 // we need to give the macro a var or let it use the global var
 // macro_rules! printf {
@@ -45,7 +45,14 @@ async fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     } else {
-        let broadcast_rx = BROADCAST_TX.subscribe();
+        let _ = BROADCAST_TX.clone();
+        let rx = unsafe {
+            let dr = Box::from_raw(BROADCAST_RX);
+            let rx = ManuallyDrop::into_inner(*dr);
+            BROADCAST_RX = std::ptr::null_mut();
+            rx
+        };
+        let (stream_read_tx, stream_read_rx) = unbounded_channel::<(u128, SocketMsg)>();
         let config_manager = initialize().await;
         let mut listener = match socket_path.initial_listener() {
             Ok(listener) => listener,
@@ -73,7 +80,7 @@ async fn main() -> ExitCode {
                 println!("dropped TX, waiting for config_manager to finish...");
                 config_manager.await.unwrap();
             },
-            _ = listener.listening(BROADCAST_TX.clone(), broadcast_rx) => {}
+            _ = listener.listening(rx, stream_read_tx, stream_read_rx) => {}
         }
     }
     if ERROR_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
