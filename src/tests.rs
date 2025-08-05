@@ -5,6 +5,7 @@ use crate::{
     cloud::download::{encode, get_download_link},
     cloud_manager::{download_a_folder, get_file_info, list_all_files, list_files},
     config_manager::Config,
+    id::Id,
     socket_utils::{
         DownloadMsg, DownloadState, ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg,
     },
@@ -36,7 +37,7 @@ async fn test_get_a_magnet_link() {
         "magnet:?xt=urn:btih:af9e3cd950cad3c3d8d345e3133cee2ecd93fd5d&tr=http%3a%2f%2ft.nyaatracker.com%2fannounce&tr=http%3a%2f%2ftracker.kamigami.org%3a2710%2fannounce&tr=http%3a%2f%2fshare.camoe.cn%3a8080%2fannounce&tr=http%3a%2f%2fopentracker.acgnx.se%2fannounce&tr=http%3a%2f%2fanidex.moe%3a6969%2fannounce&tr=http%3a%2f%2ft.acg.rip%3a6699%2fannounce&tr=https%3a%2f%2ftr.bangumi.moe%3a9696%2fannounce&tr=udp%3a%2f%2ftr.bangumi.moe%3a6969%2fannounce&tr=http%3a%2f%2fopen.acgtracker.com%3a1096%2fannounce&tr=udp%3a%2f%2ftracker.opentrackr.org%3a1337%2fannounce",
         get_a_magnet_link(
             "https://mikanime.tv/Home/Episode/af9e3cd950cad3c3d8d345e3133cee2ecd93fd5d",
-            client
+            &client
         )
         .await
         .unwrap()
@@ -72,7 +73,7 @@ async fn test_check_rss_link() {
                 .to_string(),
         ),
     ];
-    let mut futs = Vec::new();
+
     let client = ClientBuilder::new(
         reqwest::Client::builder()
             .user_agent(PC_UA)
@@ -85,8 +86,9 @@ async fn test_check_rss_link() {
         ExponentialBackoff::builder().build_with_max_retries(5),
     ))
     .build();
+    let mut futs = Vec::new();
     for url in urls {
-        futs.push(check_rss_link(url, client.clone()));
+        futs.push(check_rss_link(url, &client));
     }
     // get the results
     let check_results = futures::future::join_all(futs).await;
@@ -167,7 +169,7 @@ async fn test_xml() {
     .build();
     let response = get_response_text(
         "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=370",
-        client,
+        &client,
     )
     .await
     .unwrap();
@@ -488,7 +490,7 @@ async fn test_download_file() {
         ExponentialBackoff::builder().build_with_max_retries(5),
     ))
     .build();
-    let file = get_download_link(client, "bzh15584ul7mt8wg4".to_string())
+    let file = get_download_link(&client, "bzh15584ul7mt8wg4".to_string())
         .await
         .unwrap();
     println!("{:?}", file);
@@ -516,7 +518,7 @@ async fn test_list_files() {
         ExponentialBackoff::builder().build_with_max_retries(5),
     ))
     .build();
-    let response = list_files(client, "1508542093939703018", 20, 20)
+    let response = list_files(&client, "1508542093939703018", 20, 20)
         .await
         .unwrap();
     println!("{:?}", response);
@@ -540,10 +542,12 @@ async fn test_list_all_files() {
         ExponentialBackoff::builder().build_with_max_retries(5),
     ))
     .build();
-    let response_count = list_files(client.clone(), "2775190645642362861", 0, 20)
+    let response_count = list_files(&client, "2775190645642362861", 0, 20)
         .await
         .unwrap();
-    let response = list_all_files(client, "2775190645642362861").await.unwrap();
+    let response = list_all_files(&client, "2775190645642362861")
+        .await
+        .unwrap();
     println!("{:?}", response);
     assert_eq!(response.len() as i32, response_count.count)
 }
@@ -577,7 +581,7 @@ async fn test_get_file_info() {
         ExponentialBackoff::builder().build_with_max_retries(5),
     ))
     .build();
-    let result = get_file_info(client, "2775190645642362861").await.unwrap();
+    let result = get_file_info(&client, "2775190645642362861").await.unwrap();
     println!("{:?}", result);
 }
 
@@ -596,8 +600,9 @@ async fn test_get_file_info() {
 async fn test_bincode() {
     let socket_path = SocketPath::new("bangumi_download_test.socket");
     let listener_path = socket_path.clone();
+    let old_id = Id::generate();
     let msg = SocketMsg::Download(DownloadMsg {
-        id: 123456,
+        id: old_id,
         state: socket_utils::DownloadState::Downloading(2233),
     });
     let listener_handle = tokio::spawn(async move {
@@ -616,7 +621,7 @@ async fn test_bincode() {
     let listener_result = listener_handle.await.unwrap();
     if let SocketMsg::Download(download_msg) = listener_result {
         let DownloadMsg { id, state } = download_msg;
-        assert_eq!(id, 123456);
+        assert_eq!(id, old_id);
         if let DownloadState::Downloading(p) = state {
             assert_eq!(p, 2233);
         } else {

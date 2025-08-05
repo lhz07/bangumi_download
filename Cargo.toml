@@ -29,6 +29,5 @@ base64 = "0.22.1"
 thiserror = "2.0.12"
 ratatui = "0.29.0"
 bincode = "2.0.1"
-uuid = { version = "1.17.0", features = ["v7"] }
 log = "0.4.27"
 tui-logger = "0.17.3"

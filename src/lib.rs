@@ -3,6 +3,7 @@ pub mod cloud_manager;
 pub mod config_manager;
 pub mod crypto;
 pub mod errors;
+pub mod id;
 pub mod login_with_qrcode;
 pub mod main_proc;
 pub mod socket_utils;

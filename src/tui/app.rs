@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{collections::VecDeque, io, time::Duration};
 
 use crate::{
     END_NOTIFY,
@@ -6,6 +6,7 @@ use crate::{
     socket_utils::{ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg},
     tui::{
         events::LEvent,
+        notification_widget::Notification,
         progress_bar::{ProgressSuit, SimpleBar},
         ui::{CurrentScreen, InputState, Popup},
     },
@@ -70,6 +71,7 @@ pub struct App {
     pub(crate) finished_state: ListState,
     pub(crate) log_widget_state: TuiWidgetState,
     pub(crate) socket_tx: UnboundedSender<SocketMsg>,
+    pub(crate) notifications_queue: VecDeque<Notification>,
 }
 
 impl App {
@@ -103,7 +105,7 @@ impl App {
         };
         let log_widget_state = TuiWidgetState::new();
         let app = App {
-            current_screen: CurrentScreen::Downloading,
+            current_screen: CurrentScreen::Main,
             current_popup: None,
             input_state: InputState::NotInput,
             terminal,
@@ -111,6 +113,7 @@ impl App {
             finished_state,
             socket_tx,
             log_widget_state,
+            notifications_queue: VecDeque::new(),
         };
         app.socket_tx.send_msg(SocketMsg::SyncQuery);
         (app, event_rx, handles)

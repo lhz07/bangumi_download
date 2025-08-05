@@ -61,7 +61,7 @@ pub fn decode(input: String, key: &[u8]) -> Result<Vec<u8>, DecodeError> {
 
 /// only the pickcode of a single file works
 pub async fn get_download_link(
-    client: ClientWithMiddleware,
+    client: &ClientWithMiddleware,
     pick_code: String,
 ) -> Result<DownloadInfo, CloudError> {
     let mut key = [0u8; 16];

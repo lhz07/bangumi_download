@@ -3,6 +3,7 @@ use crate::{
     cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link},
     config_manager::{CONFIG, Config, Message, SafeSend},
     errors::{CatError, CloudError, DownloadError},
+    id::Id,
     login_with_qrcode::login_with_qrcode,
     socket_utils::{DownloadMsg, DownloadState, SocketMsg},
 };
@@ -29,7 +30,6 @@ use tokio::{
     sync::{Notify, Semaphore},
 };
 use tokio_retry::{Retry, strategy::FixedInterval};
-use uuid::Uuid;
 
 pub const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800323d) NetType/WIFI Language/zh_CN";
 
@@ -138,11 +138,11 @@ pub async fn get_cloud_cookies() -> Result<String, CatError> {
 
 async fn download_chunk(
     url: &str,
-    client: Client,
+    client: &Client,
     start: u64,
     end: u64,
     file: &sfs::File,
-    id: u128,
+    id: Id,
 ) -> Result<(), DownloadError> {
     let range_header = format!("bytes={}-{}", start, end);
     let mut response = client.get(url).header("Range", range_header).send().await?;
@@ -160,13 +160,8 @@ async fn download_chunk(
     Ok(())
 }
 
-pub async fn download_file(
-    url: &str,
-    path: &Path,
-    id: u128,
-    size: u64,
-) -> Result<(), DownloadError> {
-    let client = CLIENT_DOWNLOAD.clone();
+pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<(), DownloadError> {
+    let client = &CLIENT_DOWNLOAD;
     let response = client.head(url).send().await?;
     let content_length = response
         .headers()
@@ -194,7 +189,7 @@ pub async fn download_file(
     let mut futs = Vec::new();
     futs.push(download_chunk(
         url,
-        client.clone(),
+        client,
         current,
         current + average,
         &file,
@@ -203,7 +198,7 @@ pub async fn download_file(
     current += average;
     futs.push(download_chunk(
         url,
-        client.clone(),
+        client,
         current,
         content_length,
         &file,
@@ -223,7 +218,7 @@ pub async fn download_file(
 }
 
 pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, CloudError> {
-    let client = CLIENT_WITH_RETRY_MOBILE.clone();
+    let client = &CLIENT_WITH_RETRY_MOBILE;
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
     let insert_headers = |map: &mut HeaderMap| -> Result<(), <HeaderValue as FromStr>::Err> {
@@ -265,7 +260,7 @@ pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, CloudError> 
 }
 
 pub async fn del_cloud_task(hash: &str) -> Result<(), CloudError> {
-    let client = CLIENT_WITH_RETRY.clone();
+    let client = &CLIENT_WITH_RETRY;
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
     let insert_headers = |map: &mut HeaderMap| -> Result<(), <HeaderValue as FromStr>::Err> {
@@ -308,7 +303,7 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), CloudError> {
 }
 
 pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, CloudError> {
-    let client = CLIENT_WITH_RETRY.clone();
+    let client = &CLIENT_WITH_RETRY;
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
     let insert_headers = |map: &mut HeaderMap| -> Result<(), <HeaderValue as FromStr>::Err> {
@@ -379,7 +374,7 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, CloudE
 }
 
 pub async fn list_files(
-    client: ClientWithMiddleware,
+    client: &ClientWithMiddleware,
     folder_id: &str,
     offset: i32,
     limit: i32,
@@ -436,16 +431,15 @@ pub async fn list_files(
 }
 
 pub async fn list_all_files(
-    client: ClientWithMiddleware,
+    client: &ClientWithMiddleware,
     folder_id: &str,
 ) -> Result<Vec<FileInfo>, CloudError> {
-    let response = list_files(client.clone(), &folder_id, 0, 20).await?;
+    let response = list_files(client, &folder_id, 0, 20).await?;
     let file_count = response.count;
     let mut current = response.files.len() as i32;
     let mut files = response.files;
     while current < file_count {
-        let mut response =
-            list_files(client.clone(), &folder_id, current, file_count - current).await?;
+        let mut response = list_files(client, &folder_id, current, file_count - current).await?;
         current += response.files.len() as i32;
         files.append(&mut response.files);
     }
@@ -453,17 +447,17 @@ pub async fn list_all_files(
 }
 
 pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Result<(), CloudError> {
-    let client = CLIENT_WITH_RETRY.clone();
+    let client = &CLIENT_WITH_RETRY;
     let mut storge_path = PathBuf::new();
     storge_path.push("downloads/115");
     match ani_name {
         Some(name) => storge_path.push(name),
         None => {
-            let result = get_file_info(client.clone(), folder_id).await?;
+            let result = get_file_info(client, folder_id).await?;
             storge_path.push(result.name);
         }
     }
-    let mut files = list_all_files(client.clone(), folder_id)
+    let mut files = list_all_files(client, folder_id)
         .await?
         .into_iter()
         .map(|info| FileWithPath {
@@ -476,7 +470,7 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
     while let Some(file) = files.pop() {
         match file.info.file_id {
             Some(_) => {
-                let id = Uuid::now_v7().as_u128();
+                let id = Id::generate();
                 let msg = SocketMsg::Download(DownloadMsg {
                     id,
                     state: DownloadState::Start((file.info.name.clone(), file.info.size.unwrap())),
@@ -486,7 +480,7 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
             }
             None => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                let mut new_files = list_all_files(client.clone(), &file.info.folder_id)
+                let mut new_files = list_all_files(client, &file.info.folder_id)
                     .await?
                     .into_iter()
                     .map(|info| {
@@ -513,7 +507,7 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
             file_name,
             url: FileDownloadUrl { url, .. },
             ..
-        } = get_download_link(client.clone(), file.info.pick_code).await?;
+        } = get_download_link(client, file.info.pick_code).await?;
         let mut path = storge_path.clone();
         path.push(file.path);
         path.push(&file_name);
@@ -539,8 +533,7 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
 }
 
 pub async fn check_cookies() -> Result<(), CatError> {
-    let client = CLIENT_WITH_RETRY.clone();
-    match list_files(client, "0", 0, 1).await {
+    match list_files(&CLIENT_WITH_RETRY, "0", 0, 1).await {
         Ok(_) => {}
         Err(e) => {
             if let CloudError::Api(_) = e {
@@ -565,7 +558,7 @@ pub async fn check_cookies() -> Result<(), CatError> {
 }
 
 pub async fn get_file_info(
-    client: ClientWithMiddleware,
+    client: &ClientWithMiddleware,
     folder_id: &str,
 ) -> Result<FileInfoResponse, CloudError> {
     let params = json!({

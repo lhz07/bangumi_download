@@ -19,6 +19,7 @@ use crate::{
     cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
     config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
     errors::{CatError, CloudError, DownloadError},
+    id::Id,
     socket_utils::{ReadSocketMsg, SocketMsg, WriteSocketMsg},
     update_rss::start_rss_receive,
 };
@@ -76,6 +77,7 @@ pub async fn initialize() -> JoinHandle<()> {
         eprintln!("can not get valid cookies, error: {}", e);
         std::process::exit(1);
     }
+    // TODO: handle its error
     let _rss_refresh_handle = tokio::spawn(refresh_rss());
     // TODO: add actual error handling instead of just printing it
     let download_handle = tokio::spawn(refresh_download());
@@ -110,7 +112,7 @@ pub async fn refresh_rss() {
     }
     println!("exit refresh rss");
 }
-
+// TODO: handle error and use this function
 pub async fn check_refresh_download_error() {
     if let Err(e) = refresh_download().await {
         eprintln!("{e}")
@@ -357,8 +359,8 @@ pub async fn write_socket(
     Ok(())
 }
 
-impl SafeSend<(u128, SocketMsg)> for UnboundedSender<(u128, SocketMsg)> {
-    fn send_msg(&self, msg: (u128, SocketMsg)) {
+impl SafeSend<(Id, SocketMsg)> for UnboundedSender<(Id, SocketMsg)> {
+    fn send_msg(&self, msg: (Id, SocketMsg)) {
         if let Err(e) = self.send(msg) {
             // log error
             eprintln!(
@@ -370,8 +372,8 @@ impl SafeSend<(u128, SocketMsg)> for UnboundedSender<(u128, SocketMsg)> {
 }
 
 pub async fn read_socket(
-    id: u128,
-    tx: UnboundedSender<(u128, SocketMsg)>,
+    id: Id,
+    tx: UnboundedSender<(Id, SocketMsg)>,
     mut read: OwnedReadHalf,
 ) -> io::Result<()> {
     loop {

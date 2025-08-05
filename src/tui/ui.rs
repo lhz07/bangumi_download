@@ -1,5 +1,6 @@
 use crate::tui::{
     app::App,
+    notification_widget::NotificationWidget,
     progress_bar::{BasicBar, SpeedSum},
     qrcode_widget,
 };
@@ -7,7 +8,7 @@ use std::io;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style, Styled},
+    style::{Color, Modifier, Style, Styled},
     text::Line,
     widgets::{Block, Borders, Gauge, Scrollbar, ScrollbarOrientation, Tabs},
 };
@@ -41,6 +42,14 @@ impl InputState {
             *self = old;
         }
     }
+    pub fn to_unselected(&mut self) {
+        let old = std::mem::replace(self, Self::NotInput);
+        if let Self::SelectedAll(str) = old {
+            *self = Self::Text(str);
+        } else {
+            *self = old;
+        }
+    }
 }
 
 pub fn render(app: &mut App) -> io::Result<()> {
@@ -61,7 +70,16 @@ pub fn render(app: &mut App) -> io::Result<()> {
         .select(app.current_screen as usize);
         let main_layout =
             Layout::vertical([Constraint::Min(2), Constraint::Percentage(100)]).split(f.area());
-        f.render_widget(tabs, main_layout[0]);
+        let tab_title_area = main_layout[0];
+        let tab_content_area = main_layout[1];
+        f.render_widget(tabs, tab_title_area);
+
+        if let Some(noti) = app.notifications_queue.front_mut() {
+            f.render_stateful_widget(NotificationWidget, tab_content_area, noti);
+            if noti.should_disappear() {
+                app.notifications_queue.pop_front();
+            }
+        }
 
         if app.current_screen != CurrentScreen::Downloading {
             app.downloading_state
@@ -77,7 +95,7 @@ pub fn render(app: &mut App) -> io::Result<()> {
                         Constraint::Percentage(70),
                         Constraint::Percentage(20),
                     ])
-                    .split(main_layout[1]);
+                    .split(tab_content_area);
                     let horizontal_layout = Layout::horizontal([
                         Constraint::Percentage(20),
                         Constraint::Percentage(60),
@@ -104,7 +122,9 @@ pub fn render(app: &mut App) -> io::Result<()> {
                             if let InputState::Text(str) = &app.input_state {
                                 f.render_widget(str, popup_layout[1]);
                             } else if let InputState::SelectedAll(str) = &app.input_state {
-                                let str = str.clone().set_style(Style::default().bg(Color::Black));
+                                let str = str
+                                    .clone()
+                                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
                                 f.render_widget(str, popup_layout[1]);
                             }
                         }
@@ -115,7 +135,7 @@ pub fn render(app: &mut App) -> io::Result<()> {
                                 Constraint::Min(22),
                                 Constraint::Fill(1),
                             ])
-                            .split(main_layout[1]);
+                            .split(tab_content_area);
                             let horizontal_layout = Layout::horizontal([
                                 Constraint::Fill(1),
                                 Constraint::Min(41),
@@ -132,10 +152,10 @@ pub fn render(app: &mut App) -> io::Result<()> {
             CurrentScreen::Downloading => {
                 let state = &mut app.downloading_state;
                 let horizontal_layout = Layout::horizontal([
-                    Constraint::Length(main_layout[1].width - 3),
+                    Constraint::Length(tab_content_area.width - 3),
                     Constraint::Length(3),
                 ])
-                .split(main_layout[1]);
+                .split(tab_content_area);
                 let vertical_layout =
                     Layout::vertical([Constraint::Length(2), Constraint::Fill(1)])
                         .split(horizontal_layout[0]);
@@ -211,7 +231,7 @@ pub fn render(app: &mut App) -> io::Result<()> {
                 let logs = tui_logger::TuiLoggerWidget::default()
                     .block(Block::default().title("Logs").borders(Borders::ALL))
                     .state(&app.log_widget_state);
-                f.render_widget(logs, main_layout[1]);
+                f.render_widget(logs, tab_content_area);
             }
         }
     })?;

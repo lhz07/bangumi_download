@@ -6,6 +6,7 @@ use crate::{
     socket_utils::{DownloadState, SocketMsg},
     tui::{
         app::{App, ListState},
+        notification_widget::Notification,
         progress_bar::{BasicBar, SimpleBar},
         ui::{self, CurrentScreen, InputState, Popup},
     },
@@ -45,7 +46,7 @@ impl LEvent {
                         SocketMsg::Download(msg) => match msg.state {
                             DownloadState::Start((name, size)) => {
                                 log::trace!(
-                                    "received a socket download start msg, name: {}, id: {}, size: {}",
+                                    "received a socket download start msg, name: {}, {}, size: {}",
                                     name,
                                     msg.id,
                                     size
@@ -55,10 +56,7 @@ impl LEvent {
                             }
                             DownloadState::Downloading(_) => (),
                             DownloadState::Finished => {
-                                log::trace!(
-                                    "received a socket download finish msg, id: {}",
-                                    msg.id
-                                );
+                                log::trace!("received a socket download finish msg, {}", msg.id);
                                 if let Some(bar) =
                                     app.downloading_state.progress_suit.get_bar_mut(msg.id)
                                 {
@@ -100,9 +98,13 @@ impl LEvent {
                         }
                         SocketMsg::Ok(info) => {
                             log::info!("{}", info);
+                            let noti = Notification::new("Success".to_string(), info);
+                            app.notifications_queue.push_back(noti);
                         }
-                        SocketMsg::Error(error) => {
+                        SocketMsg::Error((info, error)) => {
                             log::error!("{}", error);
+                            let noti = Notification::new("Failed".to_string(), info);
+                            app.notifications_queue.push_back(noti);
                         }
                         // no need to handle these messages
                         SocketMsg::DownloadFolder(_) => (),
@@ -255,6 +257,11 @@ impl LEvent {
                             .transition(tui_logger::TuiWidgetEvent::PrevPageKey);
                     }
                     _ => {}
+                }
+            }
+            KeyCode::Right => {
+                if let InputState::SelectedAll(_) = &mut app.input_state {
+                    app.input_state.to_unselected();
                 }
             }
             _ => {}

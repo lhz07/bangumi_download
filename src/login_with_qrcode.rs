@@ -44,7 +44,7 @@ pub struct Query {
     pub sign: String,
 }
 
-async fn get_qrcode_token(client: reqwest::Client) -> Result<Token, CloudError> {
+async fn get_qrcode_token(client: &reqwest::Client) -> Result<Token, CloudError> {
     let response = client
         .get("https://qrcodeapi.115.com/api/1.0/web/1.0/token/")
         .send()
@@ -56,7 +56,7 @@ async fn get_qrcode_token(client: reqwest::Client) -> Result<Token, CloudError> 
 }
 
 async fn post_qrcode_result(
-    client: reqwest::Client,
+    client: &reqwest::Client,
     uid: &str,
     app: &str,
 ) -> Result<Cookies, CloudError> {
@@ -72,7 +72,7 @@ async fn post_qrcode_result(
     Ok(response.data.cookies)
 }
 
-async fn get_qrcode_status(client: reqwest::Client, query: &Query) -> Result<Status, CloudError> {
+async fn get_qrcode_status(client: &reqwest::Client, query: &Query) -> Result<Status, CloudError> {
     let response = client
         .get("https://qrcodeapi.115.com/get/status/?")
         .query(query)
@@ -86,7 +86,7 @@ async fn get_qrcode_status(client: reqwest::Client, query: &Query) -> Result<Sta
 
 pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
     let client = reqwest::Client::new();
-    let qrcode_token = get_qrcode_token(client.clone()).await?;
+    let qrcode_token = get_qrcode_token(&client).await?;
     let Token {
         qrcode,
         uid,
@@ -131,7 +131,7 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
     //     .build();
     println!("{}", output);
     loop {
-        match get_qrcode_status(client.clone(), &query).await {
+        match get_qrcode_status(&client, &query).await {
             Ok(status) => match status.status {
                 0 => println!("[status=0] qrcode: waiting"),
                 1 => println!("[status=1] qrcode: scanned"),
@@ -149,7 +149,7 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
             }
         }
     }
-    let cookies = post_qrcode_result(client.clone(), &uid, app).await?;
+    let cookies = post_qrcode_result(&client, &uid, app).await?;
     let cookie_list = vec![
         ("UID", cookies.UID),
         ("CID", cookies.CID),

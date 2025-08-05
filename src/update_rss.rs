@@ -69,7 +69,7 @@ impl Filter for LItem {
 
 pub async fn get_response_text(
     url: &str,
-    client: ClientWithMiddleware,
+    client: &ClientWithMiddleware,
 ) -> Result<String, DownloadError> {
     let response = client.get(url).send().await?;
     if response.status().is_success() {
@@ -86,12 +86,7 @@ pub async fn start_rss_receive(urls: Vec<&String>) -> Result<(), CatError> {
     let tx = TX.load_full().ok_or(CatError::Exit)?;
     let mut futs = Vec::new();
     for url in urls {
-        futs.push(rss_receive(
-            &tx,
-            url,
-            &old_config,
-            CLIENT_WITH_RETRY.clone(),
-        ));
+        futs.push(rss_receive(&tx, url, &old_config, &CLIENT_WITH_RETRY));
     }
     // get the results
     println!("waiting for refreshing rss");
@@ -163,8 +158,7 @@ pub async fn get_all_episode_magnet_links(
     let url = format!(
         "https://mikanime.tv/Home/ExpandEpisodeTable?bangumiId={ani_id}&subtitleGroupId={sub_id}&take=100"
     );
-    let client = CLIENT_WITH_RETRY.clone();
-    let response = get_response_text(&url, client)
+    let response = get_response_text(&url, &CLIENT_WITH_RETRY)
         .await
         .map_err(|e| CatError::Parse(format!("Get all episode magnet links error: {e}")))?;
     let soup = Html::parse_document(&response);
@@ -191,7 +185,7 @@ pub async fn get_all_episode_magnet_links(
     Ok(magnet_links)
 }
 
-async fn get_subgroup_name(url: &str, client: ClientWithMiddleware) -> Option<String> {
+async fn get_subgroup_name(url: &str, client: &ClientWithMiddleware) -> Option<String> {
     let response = match get_response_text(url, client).await {
         Ok(response) => response,
         Err(error) => {
@@ -207,10 +201,9 @@ async fn get_subgroup_name(url: &str, client: ClientWithMiddleware) -> Option<St
 }
 
 pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, CatError> {
-    let client = CLIENT_WITH_RETRY.clone();
     let futs = item_urls
         .iter()
-        .map(|url| get_a_magnet_link(url, client.clone()))
+        .map(|url| get_a_magnet_link(url, &CLIENT_WITH_RETRY))
         .collect::<Vec<_>>();
     let results = join_all(futs).await;
     println!("process links");
@@ -220,9 +213,9 @@ pub async fn get_all_magnet(item_urls: Vec<&str>) -> Result<Vec<String>, CatErro
 
 pub async fn get_a_magnet_link(
     url: &str,
-    client: ClientWithMiddleware,
+    client: &ClientWithMiddleware,
 ) -> Result<String, CatError> {
-    let response = get_response_text(url, client.clone()).await?;
+    let response = get_response_text(url, client).await?;
     let resource = Html::parse_document(&response);
     let selector = Selector::parse("a[href]").expect("html element selector must be valid!");
     let magnet_link = resource
@@ -234,7 +227,7 @@ pub async fn get_a_magnet_link(
     Ok(magnet_link)
 }
 
-pub async fn check_rss_link(url: &str, client: ClientWithMiddleware) -> Result<(), String> {
+pub async fn check_rss_link(url: &str, client: &ClientWithMiddleware) -> Result<(), String> {
     let pattern = Regex::new(r"^https?://mikanime\.tv/RSS/Bangumi\?(bangumiId=\d+&subgroupid=\d+|subgroupid=\d+&bangumiId=\d+)$").expect("regex should be valid!");
     if let None = pattern.captures(url) {
         return Err("Invalid url!".into());
@@ -253,7 +246,7 @@ pub async fn rss_receive(
     tx: &mpsc::UnboundedSender<Message>,
     url: &str,
     old_config: &Config,
-    client: ClientWithMiddleware,
+    client: &ClientWithMiddleware,
 ) -> Result<(), CatError> {
     let response = client.get(url).send().await?.text().await?;
     let rss = de::from_str::<RSS>(&response)?;
@@ -262,21 +255,16 @@ pub async fn rss_receive(
     let latest_item = items
         .first()
         .ok_or(CatError::Parse("can not found latest item!".to_string()))?;
-    let parse_link = async || -> Option<(String, String, String, String)> {
+    let parse_link = async || -> Option<(&str, &str, String, &str)> {
         let mut split_ani_sub = channel
             .link
             .split("bangumiId=")
             .nth(1)?
             .split("&subgroupid=");
-        let ani_id = split_ani_sub.next()?.to_string();
-        let sub_id = split_ani_sub.next()?.to_string();
+        let ani_id = split_ani_sub.next()?;
+        let sub_id = split_ani_sub.next()?;
         let sub_name = get_subgroup_name(&latest_item.link, client).await?;
-        let bangumi_name = channel
-            .title
-            .split(" - ")
-            .nth(1)
-            .unwrap_or(&channel.title)
-            .to_string();
+        let bangumi_name = channel.title.split(" - ").nth(1).unwrap_or(&channel.title);
         Some((ani_id, sub_id, sub_name, bangumi_name))
     };
     let (ani_id, sub_id, sub_name, bangumi_name) = parse_link()
@@ -288,16 +276,17 @@ pub async fn rss_receive(
     // check if the bangumi updates and is it first time to be added
     let old_bangumi_dict = &old_config.bangumi;
     let mut magnet_links: Vec<String> = Vec::new();
+
     if !old_bangumi_dict.contains_key(&bangumi_id) {
         // write to config
-        let insert_key = format!("{ani_id}&{sub_id}");
+        let insert_key = bangumi_id.clone();
         let cmd = Box::new(|config: &mut Config| {
             config.bangumi.insert(insert_key, latest_update);
         });
         let msg = Message::new(cmd, None);
         tx.send_msg(msg);
         magnet_links
-            .extend(get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await?);
+            .extend(get_all_episode_magnet_links(ani_id, sub_id, &old_config.filter).await?);
         let insert_title = title.clone();
         let insert_url = url.to_string();
         let cmd = Box::new(|config: &mut Config| {

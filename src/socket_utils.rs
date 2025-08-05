@@ -15,12 +15,12 @@ use tokio::{
     io::{self, AsyncReadExt},
     net::UnixListener,
 };
-use uuid::Uuid;
 
 use crate::END_NOTIFY;
 use crate::cloud_manager::download_a_folder;
 use crate::config_manager::SafeSend;
 use crate::errors::SocketError;
+use crate::id::Id;
 use crate::main_proc::{read_socket, write_socket};
 use crate::tui::progress_bar::{
     BasicBar, Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar,
@@ -105,8 +105,8 @@ impl SocketStateDetect for SocketPath {
 // SocketListener ------------------------------------------------
 pub struct SocketListener {
     listener: ManuallyDrop<UnixListener>,
-    stream_read_tx: UnboundedSender<(u128, SocketMsg)>,
-    stream_write_txs: HashMap<u128, UnboundedSender<SocketMsg>>,
+    stream_read_tx: UnboundedSender<(Id, SocketMsg)>,
+    stream_write_txs: HashMap<Id, UnboundedSender<SocketMsg>>,
     path: PathBuf,
     state: ProgressSuit<ProgressBar>,
 }
@@ -117,7 +117,7 @@ impl SocketListener {
         P: AsRef<Path>,
     {
         let listener = ManuallyDrop::new(UnixListener::bind(&path)?);
-        let (stream_read_tx, _) = unbounded_channel::<(u128, SocketMsg)>();
+        let (stream_read_tx, _) = unbounded_channel::<(Id, SocketMsg)>();
         Ok(Self {
             listener,
             stream_read_tx,
@@ -132,7 +132,7 @@ impl SocketListener {
                 // we need to use another channel, because `OwnedWriteHalf` needs mut to use `write_all`,
                 // which means we should use a lock or a channel.
                 let (read, write) = stream.into_split();
-                let id = Uuid::now_v7().as_u128();
+                let id = Id::generate();
                 let (write_tx, write_rx) = unbounded_channel::<SocketMsg>();
                 tokio::spawn(read_socket(id, self.stream_read_tx.clone(), read));
                 tokio::spawn(write_socket(write_rx, write));
@@ -230,7 +230,7 @@ impl SocketListener {
         }
     }
 
-    async fn handle_stream_msg(&mut self, stream_msg: (u128, SocketMsg)) {
+    async fn handle_stream_msg(&mut self, stream_msg: (Id, SocketMsg)) {
         let (id, msg) = stream_msg;
         match msg {
             SocketMsg::SyncQuery => {
@@ -253,9 +253,14 @@ impl SocketListener {
                 tokio::spawn(async move {
                     if let Err(e) = download_a_folder(&cid, None).await {
                         eprintln!("download a folder error: {e}");
-                        tx.send_msg(SocketMsg::Error(e.to_string()));
+                        let info = format!(
+                            "Can not download the folder: {cid}, please check the cid and login status"
+                        );
+                        tx.send_msg(SocketMsg::Error((info, e.to_string())));
                     } else {
                         println!("successfully downloaded a folder");
+                        let info = format!("Successfully downloaded the folder: {cid}");
+                        tx.send_msg(SocketMsg::Ok(info));
                     }
                 });
             }
@@ -302,8 +307,8 @@ impl SocketListener {
     pub async fn listening(
         &mut self,
         mut rx: UnboundedReceiver<SocketMsg>,
-        stream_read_tx: UnboundedSender<(u128, SocketMsg)>,
-        mut stream_read_rx: UnboundedReceiver<(u128, SocketMsg)>,
+        stream_read_tx: UnboundedSender<(Id, SocketMsg)>,
+        mut stream_read_rx: UnboundedReceiver<(Id, SocketMsg)>,
     ) {
         // replace the default tx
         self.stream_read_tx = stream_read_tx;
@@ -487,7 +492,7 @@ pub enum SocketMsg {
     /// - cid
     DownloadFolder(String),
     Ok(String),
-    Error(String),
+    Error((String, String)),
     DownloadSync(Vec<ProgressState>),
     SyncQuery,
     SyncResp(SyncInfo),
@@ -497,7 +502,7 @@ pub enum SocketMsg {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct DownloadMsg {
     /// - task id
-    pub id: u128,
+    pub id: Id,
     pub state: DownloadState,
 }
 

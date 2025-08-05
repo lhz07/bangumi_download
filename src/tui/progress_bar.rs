@@ -2,9 +2,11 @@ use std::{collections::HashMap, fmt, time::Instant};
 
 use bincode::{Decode, Encode};
 
+use crate::id::Id;
+
 #[derive(Encode, Decode, Debug, Clone, Copy)]
 pub struct ProgressState {
-    pub id: u128,
+    pub id: Id,
     pub current_size: u64,
     pub current_speed: u64,
 }
@@ -141,7 +143,7 @@ impl ProgressBar {
         &self.name
     }
 
-    pub fn progress_state(&mut self, id: u128) -> ProgressState {
+    pub fn progress_state(&mut self, id: Id) -> ProgressState {
         let current_speed = self.calculate_speed();
         ProgressState {
             id,
@@ -207,8 +209,8 @@ impl SpeedSum for ProgressSuit<SimpleBar> {
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct ProgressSuit<T> {
-    list: Vec<u128>,
-    state: HashMap<u128, T>,
+    list: Vec<Id>,
+    state: HashMap<Id, T>,
 }
 
 impl<T> ProgressSuit<T> {
@@ -218,12 +220,12 @@ impl<T> ProgressSuit<T> {
             state: HashMap::new(),
         }
     }
-    pub fn add(&mut self, id: u128, bar: T) {
+    pub fn add(&mut self, id: Id, bar: T) {
         self.list.push(id);
         self.state.insert(id, bar);
     }
 
-    pub fn remove(&mut self, id: u128) -> Option<T> {
+    pub fn remove(&mut self, id: Id) -> Option<T> {
         self.list.retain(|i| i != &id);
         self.state.remove(&id)
     }
@@ -240,7 +242,7 @@ impl<T> ProgressSuit<T> {
         Iter::new(self.list.iter(), &self.state)
     }
 
-    pub fn get_bar_mut(&mut self, id: u128) -> Option<&mut T> {
+    pub fn get_bar_mut(&mut self, id: Id) -> Option<&mut T> {
         self.state.get_mut(&id)
     }
     pub fn retain<F>(&mut self, mut f: F)
@@ -282,12 +284,12 @@ impl ProgressSuit<ProgressBar> {
 }
 
 pub struct Iter<'a, T> {
-    list: core::slice::Iter<'a, u128>,
-    state: &'a HashMap<u128, T>,
+    list: core::slice::Iter<'a, Id>,
+    state: &'a HashMap<Id, T>,
 }
 
 impl<'a, T> Iter<'a, T> {
-    fn new(list: core::slice::Iter<'a, u128>, state: &'a HashMap<u128, T>) -> Self {
+    fn new(list: core::slice::Iter<'a, Id>, state: &'a HashMap<Id, T>) -> Self {
         Iter { list, state }
     }
 }
