@@ -6,9 +6,7 @@ use crate::{
     cloud_manager::{download_a_folder, get_file_info, list_all_files, list_files},
     config_manager::Config,
     id::Id,
-    socket_utils::{
-        DownloadMsg, DownloadState, ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg,
-    },
+    socket_utils::{DownloadMsg, DownloadState, ReadSocketMsg, SocketPath, WriteSocketMsg},
 };
 use config_manager::*;
 use quick_xml::de;
@@ -601,7 +599,7 @@ async fn test_bincode() {
     let socket_path = SocketPath::new("bangumi_download_test.socket");
     let listener_path = socket_path.clone();
     let old_id = Id::generate();
-    let msg = SocketMsg::Download(DownloadMsg {
+    let msg = ServerMsg::Download(DownloadMsg {
         id: old_id,
         state: socket_utils::DownloadState::Downloading(2233),
     });
@@ -619,7 +617,7 @@ async fn test_bincode() {
     });
     sender.await.unwrap();
     let listener_result = listener_handle.await.unwrap();
-    if let SocketMsg::Download(download_msg) = listener_result {
+    if let ServerMsg::Download(download_msg) = listener_result {
         let DownloadMsg { id, state } = download_msg;
         assert_eq!(id, old_id);
         if let DownloadState::Downloading(p) = state {

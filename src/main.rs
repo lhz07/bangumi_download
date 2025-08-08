@@ -4,7 +4,7 @@ use bangumi_download::{
     BROADCAST_RX, BROADCAST_TX, END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
     id::Id,
     main_proc::initialize,
-    socket_utils::{SocketMsg, SocketPath, SocketState, SocketStateDetect},
+    socket_utils::{ClientMsg, SocketPath, SocketState, SocketStateDetect},
     tui::{app::App, events::LEvent},
 };
 use futures::future::join3;
@@ -53,7 +53,7 @@ async fn main() -> ExitCode {
             BROADCAST_RX = std::ptr::null_mut();
             rx
         };
-        let (stream_read_tx, stream_read_rx) = unbounded_channel::<(Id, SocketMsg)>();
+        let (stream_read_tx, stream_read_rx) = unbounded_channel::<(Id, ClientMsg)>();
         let config_manager = initialize().await;
         let mut listener = match socket_path.initial_listener() {
             Ok(listener) => listener,

@@ -3,7 +3,7 @@ use std::io;
 use crate::{
     END_NOTIFY,
     config_manager::SafeSend,
-    socket_utils::{DownloadState, SocketMsg},
+    socket_utils::{ClientMsg, DownloadState, ServerMsg},
     tui::{
         app::{App, ListState},
         notification_widget::Notification,
@@ -18,7 +18,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 pub enum LEvent {
     Tui(Event),
     Render,
-    Socket(SocketMsg),
+    Socket(ServerMsg),
 }
 
 impl LEvent {
@@ -43,15 +43,16 @@ impl LEvent {
                 LEvent::Socket(msg) => {
                     // deal with socket message here
                     match msg {
-                        SocketMsg::Download(msg) => match msg.state {
-                            DownloadState::Start((name, size)) => {
+                        ServerMsg::Download(msg) => match msg.state {
+                            DownloadState::Start(ptr) => {
+                                let (name, size) = *ptr;
                                 log::trace!(
                                     "received a socket download start msg, name: {}, {}, size: {}",
                                     name,
                                     msg.id,
                                     size
                                 );
-                                let bar = SimpleBar::new(name, size);
+                                let bar = SimpleBar::new(name.into_string(), size);
                                 app.downloading_state.progress_suit.add(msg.id, bar);
                             }
                             DownloadState::Downloading(_) => (),
@@ -65,11 +66,11 @@ impl LEvent {
                                     log::error!(
                                         "received a finished msg, but can not find its progress bar"
                                     );
-                                    app.socket_tx.send_msg(SocketMsg::SyncQuery);
+                                    app.socket_tx.send_msg(ClientMsg::SyncQuery);
                                 }
                             }
                         },
-                        SocketMsg::DownloadSync(state) => {
+                        ServerMsg::DownloadSync(state) => {
                             // log::trace!("received a socket download sync msg");
                             let mut is_lossy = false;
                             for s in &state {
@@ -90,26 +91,28 @@ impl LEvent {
                             // {
                             if is_lossy {
                                 log::error!("send SyncQuery because of DownloadSync");
-                                app.socket_tx.send_msg(SocketMsg::SyncQuery);
+                                app.socket_tx.send_msg(ClientMsg::SyncQuery);
                             }
                         }
-                        SocketMsg::SyncResp(info) => {
+                        ServerMsg::SyncResp(info) => {
                             app.downloading_state.progress_suit = info.progresses;
                         }
-                        SocketMsg::Ok(info) => {
+                        ServerMsg::Ok(info) => {
                             log::info!("{}", info);
-                            let noti = Notification::new("Success".to_string(), info);
+                            let noti = Notification::new("Success".to_string(), info.into_string());
                             app.notifications_queue.push_back(noti);
                         }
-                        SocketMsg::Error((info, error)) => {
+                        ServerMsg::Error(ptr) => {
+                            let (info, error) = *ptr;
                             log::error!("{}", error);
-                            let noti = Notification::new("Failed".to_string(), info);
+                            let noti = Notification::new("Failed".to_string(), info.into_string());
                             app.notifications_queue.push_back(noti);
                         }
+                        ServerMsg::Info(info) => {}
+                        ServerMsg::LoginState(state) => {}
+                        ServerMsg::LoginUrl(url) => {}
                         // no need to handle these messages
-                        SocketMsg::DownloadFolder(_) => (),
-                        SocketMsg::Null => (),
-                        SocketMsg::SyncQuery => (),
+                        ServerMsg::Null => (),
                     }
                 }
             }
@@ -202,7 +205,7 @@ impl LEvent {
                                 && !str.is_empty()
                             {
                                 let str = std::mem::replace(str, String::new());
-                                let msg = SocketMsg::DownloadFolder(str);
+                                let msg = ClientMsg::DownloadFolder(str.into_boxed_str());
                                 app.socket_tx.send_msg(msg);
                             }
                         }

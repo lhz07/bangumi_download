@@ -5,7 +5,7 @@ use crate::{
     errors::{CatError, CloudError, DownloadError},
     id::Id,
     login_with_qrcode::login_with_qrcode,
-    socket_utils::{DownloadMsg, DownloadState, SocketMsg},
+    socket_utils::{DownloadMsg, DownloadState, ServerMsg},
 };
 use futures::future::join_all;
 use regex::Regex;
@@ -150,7 +150,7 @@ async fn download_chunk(
     while let Some(chunk) = response.chunk().await? {
         file.write_all_at(&chunk, current)?;
         let delta = chunk.len() as u64;
-        let msg = SocketMsg::Download(DownloadMsg {
+        let msg = ServerMsg::Download(DownloadMsg {
             id,
             state: DownloadState::Downloading(delta),
         });
@@ -208,7 +208,7 @@ pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<
     for i in results {
         i?;
     }
-    let msg = SocketMsg::Download(DownloadMsg {
+    let msg = ServerMsg::Download(DownloadMsg {
         id,
         state: DownloadState::Finished,
     });
@@ -471,9 +471,12 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
         match file.info.file_id {
             Some(_) => {
                 let id = Id::generate();
-                let msg = SocketMsg::Download(DownloadMsg {
+                let msg = ServerMsg::Download(DownloadMsg {
                     id,
-                    state: DownloadState::Start((file.info.name.clone(), file.info.size.unwrap())),
+                    state: DownloadState::Start(Box::new((
+                        file.info.name.as_str().into(),
+                        file.info.size.unwrap(),
+                    ))),
                 });
                 BROADCAST_TX.send_msg(msg);
                 files_to_download.push((id, file));

@@ -1,5 +1,4 @@
-use crate::errors::CloudError;
-use qrcode::{Color, QrCode};
+use crate::{BROADCAST_TX, config_manager::SafeSend, errors::CloudError};
 use serde::{Deserialize, Serialize};
 
 // const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];
@@ -98,30 +97,33 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
         time,
         sign,
     };
+    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::LoginUrl(
+        qrcode.into_boxed_str(),
+    ));
     // println!("{}", qrcode);
-    let code = QrCode::new(qrcode.as_bytes()).map_err(|e| format!("{e}"))?;
-    let width = code.width();
-    let mut output = String::new();
+    // let code = QrCode::new(qrcode.as_bytes()).map_err(|e| format!("{e}"))?;
+    // let width = code.width();
+    // let mut output = String::new();
 
-    // 每两个行压缩为一个字符（上下两个像素 -> ▀、▄、█、空格）
-    for y in (0..width).step_by(2) {
-        for x in 0..width {
-            let top = code[(x, y)] == Color::Dark;
-            let bottom = if y + 1 < width {
-                code[(x, y + 1)] == Color::Dark
-            } else {
-                false
-            };
-            let ch = match (top, bottom) {
-                (true, true) => '█',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (false, false) => ' ',
-            };
-            output.push(ch);
-        }
-        output.push('\n');
-    }
+    // // 每两个行压缩为一个字符（上下两个像素 -> ▀、▄、█、空格）
+    // for y in (0..width).step_by(2) {
+    //     for x in 0..width {
+    //         let top = code[(x, y)] == Color::Dark;
+    //         let bottom = if y + 1 < width {
+    //             code[(x, y + 1)] == Color::Dark
+    //         } else {
+    //             false
+    //         };
+    //         let ch = match (top, bottom) {
+    //             (true, true) => '█',
+    //             (true, false) => '▀',
+    //             (false, true) => '▄',
+    //             (false, false) => ' ',
+    //         };
+    //         output.push(ch);
+    //     }
+    //     output.push('\n');
+    // }
     // let code_string = code
     //     .render::<char>()
     //     // .dark_color(Rgb([0, 0, 128]))
@@ -129,19 +131,44 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
     //     .quiet_zone(false) // disable quiet zone (white border)
     //     .min_dimensions(1, 1)
     //     .build();
-    println!("{}", output);
+    // println!("{}", output);
+    const STATUS: [&str; 5] = [
+        "[status=-2] qrcode: canceled",
+        "[status=-1] qrcode: expired",
+        "[status=0] qrcode: waiting",
+        "[status=1] qrcode: scanned",
+        "[status=2] qrcode: signed in",
+    ];
     loop {
         match get_qrcode_status(&client, &query).await {
             Ok(status) => match status.status {
-                0 => println!("[status=0] qrcode: waiting"),
-                1 => println!("[status=1] qrcode: scanned"),
+                0..=1 => {
+                    let status_str = STATUS[(status.status + 2) as usize];
+                    println!("{}", status_str);
+                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Info(status_str.into()));
+                }
                 2 => {
-                    println!("[status=2] qrcode: signed in");
+                    let status_str = STATUS[(status.status + 2) as usize];
+                    println!("{}", status_str);
+                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Ok(status_str.into()));
                     break;
                 }
-                -1 => Err("[status=-1] qrcode: expired".to_string())?,
-                -2 => Err("[status=-2] qrcode: canceled".to_string())?,
-                _ => Err(format!("qrcode: aborted with {}", status.status))?,
+                -2..=-1 => {
+                    let status_str = STATUS[(status.status + 2) as usize];
+                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Error(Box::new((
+                        status_str.into(),
+                        status_str.into(),
+                    ))));
+                    Err(status_str.to_string())?
+                }
+                _ => {
+                    let status_str = format!("qrcode: aborted with {}", status.status);
+                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Error(Box::new((
+                        status_str.as_str().into(),
+                        status_str.as_str().into(),
+                    ))));
+                    Err(status_str)?
+                }
             },
             Err(error) => {
                 eprintln!("Error: {error}");

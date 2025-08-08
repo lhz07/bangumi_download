@@ -3,7 +3,7 @@ use std::{collections::VecDeque, io, time::Duration};
 use crate::{
     END_NOTIFY,
     config_manager::SafeSend,
-    socket_utils::{ReadSocketMsg, SocketMsg, SocketPath, WriteSocketMsg},
+    socket_utils::{ClientMsg, ReadSocketMsg, SocketPath, WriteSocketMsg},
     tui::{
         events::LEvent,
         notification_widget::Notification,
@@ -25,10 +25,10 @@ use tokio::{
 };
 use tui_logger::TuiWidgetState;
 
-impl SafeSend<SocketMsg> for UnboundedSender<SocketMsg> {
-    fn send_msg(&self, msg: SocketMsg) {
+impl SafeSend<ClientMsg> for UnboundedSender<ClientMsg> {
+    fn send_msg(&self, msg: ClientMsg) {
         if let Err(e) = self.send(msg) {
-            log::error!("It seems that the Receiver of SocketMsg is closed too early, error: {e}");
+            log::error!("It seems that the Receiver of ClientMsg is closed too early, error: {e}");
         }
     }
 }
@@ -70,7 +70,7 @@ pub struct App {
     pub(crate) downloading_state: ListState,
     pub(crate) finished_state: ListState,
     pub(crate) log_widget_state: TuiWidgetState,
-    pub(crate) socket_tx: UnboundedSender<SocketMsg>,
+    pub(crate) socket_tx: UnboundedSender<ClientMsg>,
     pub(crate) notifications_queue: VecDeque<Notification>,
 }
 
@@ -91,8 +91,8 @@ impl App {
         let finished_state = ListState::new();
         // the event loop chanel
         let (event_tx, event_rx) = unbounded_channel::<LEvent>();
-        // the socket channel
-        let (socket_tx, socket_rx) = unbounded_channel::<SocketMsg>();
+        // the socket channel, write the msg to socket
+        let (socket_tx, socket_rx) = unbounded_channel::<ClientMsg>();
         let socket_handle = tokio::spawn(Self::initialize_socket(
             event_tx.clone(),
             socket_rx,
@@ -115,7 +115,7 @@ impl App {
             log_widget_state,
             notifications_queue: VecDeque::new(),
         };
-        app.socket_tx.send_msg(SocketMsg::SyncQuery);
+        app.socket_tx.send_msg(ClientMsg::SyncQuery);
         (app, event_rx, handles)
     }
     pub async fn receive_ui_events(tx: UnboundedSender<LEvent>) -> io::Result<()> {
@@ -134,7 +134,7 @@ impl App {
     }
     pub async fn initialize_socket(
         tx: UnboundedSender<LEvent>,
-        rx: UnboundedReceiver<SocketMsg>,
+        rx: UnboundedReceiver<ClientMsg>,
         socket_path: SocketPath,
     ) -> io::Result<()> {
         let stream = socket_path.to_stream().await?;
@@ -163,7 +163,7 @@ impl App {
         Ok(())
     }
     pub async fn write_socket(
-        mut rx: UnboundedReceiver<SocketMsg>,
+        mut rx: UnboundedReceiver<ClientMsg>,
         mut write: OwnedWriteHalf,
     ) -> io::Result<()> {
         loop {

@@ -20,7 +20,7 @@ use crate::{
     config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
     errors::{CatError, CloudError, DownloadError},
     id::Id,
-    socket_utils::{ReadSocketMsg, SocketMsg, WriteSocketMsg},
+    socket_utils::{ClientMsg, ReadSocketMsg, ServerMsg, WriteSocketMsg},
     update_rss::start_rss_receive,
 };
 
@@ -348,7 +348,7 @@ async fn del_a_task<T: DeleteTask + 'static>(
 }
 
 pub async fn write_socket(
-    mut rx: UnboundedReceiver<SocketMsg>,
+    mut rx: UnboundedReceiver<ServerMsg>,
     mut write: OwnedWriteHalf,
 ) -> io::Result<()> {
     while let Some(msg) = rx.recv().await {
@@ -359,12 +359,24 @@ pub async fn write_socket(
     Ok(())
 }
 
-impl SafeSend<(Id, SocketMsg)> for UnboundedSender<(Id, SocketMsg)> {
-    fn send_msg(&self, msg: (Id, SocketMsg)) {
+impl SafeSend<(Id, ClientMsg)> for UnboundedSender<(Id, ClientMsg)> {
+    fn send_msg(&self, msg: (Id, ClientMsg)) {
         if let Err(e) = self.send(msg) {
             // log error
             eprintln!(
-                "Error occured when sending msg to global msg handler: {}",
+                "Error occured when sending msg to client msg handler: {}",
+                e
+            );
+        }
+    }
+}
+
+impl SafeSend<ServerMsg> for UnboundedSender<ServerMsg> {
+    fn send_msg(&self, msg: ServerMsg) {
+        if let Err(e) = self.send(msg) {
+            // log error
+            eprintln!(
+                "Error occured when sending msg to server msg handler: {}",
                 e
             );
         }
@@ -373,7 +385,7 @@ impl SafeSend<(Id, SocketMsg)> for UnboundedSender<(Id, SocketMsg)> {
 
 pub async fn read_socket(
     id: Id,
-    tx: UnboundedSender<(Id, SocketMsg)>,
+    tx: UnboundedSender<(Id, ClientMsg)>,
     mut read: OwnedReadHalf,
 ) -> io::Result<()> {
     loop {

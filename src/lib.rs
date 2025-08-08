@@ -29,7 +29,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::{errors::CatError, socket_utils::SocketMsg};
+use crate::{errors::CatError, socket_utils::ServerMsg};
 pub const PC_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -91,13 +91,13 @@ pub static CLIENT_PROXY: Lazy<ClientWithMiddleware> = Lazy::new(|| {
 pub static TX: Lazy<ArcSwapOption<UnboundedSender<Message>>> =
     Lazy::new(|| ArcSwapOption::new(None));
 // I suppose the capacity is the count of messages
-pub static BROADCAST_TX: Lazy<UnboundedSender<SocketMsg>> = Lazy::new(|| {
-    let (tx, rx) = unbounded_channel::<SocketMsg>();
+pub static BROADCAST_TX: Lazy<UnboundedSender<ServerMsg>> = Lazy::new(|| {
+    let (tx, rx) = unbounded_channel::<ServerMsg>();
     let rx = Box::new(ManuallyDrop::new(rx));
     unsafe { BROADCAST_RX = Box::leak(rx) }
     tx
 });
-pub static mut BROADCAST_RX: *mut ManuallyDrop<UnboundedReceiver<SocketMsg>> = std::ptr::null_mut();
+pub static mut BROADCAST_RX: *mut ManuallyDrop<UnboundedReceiver<ServerMsg>> = std::ptr::null_mut();
 pub static ERROR_STATUS: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 pub static REFRESH_DOWNLOAD: Lazy<Mutex<Option<JoinHandle<Result<(), CatError>>>>> =
     Lazy::new(|| Mutex::new(None));

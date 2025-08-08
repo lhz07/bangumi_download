@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use crate::END_NOTIFY;
-use crate::cloud_manager::download_a_folder;
+use crate::cloud_manager::{download_a_folder, get_cloud_cookies};
 use crate::config_manager::SafeSend;
 use crate::errors::SocketError;
 use crate::id::Id;
@@ -105,8 +105,8 @@ impl SocketStateDetect for SocketPath {
 // SocketListener ------------------------------------------------
 pub struct SocketListener {
     listener: ManuallyDrop<UnixListener>,
-    stream_read_tx: UnboundedSender<(Id, SocketMsg)>,
-    stream_write_txs: HashMap<Id, UnboundedSender<SocketMsg>>,
+    stream_read_tx: UnboundedSender<(Id, ClientMsg)>,
+    stream_write_txs: HashMap<Id, UnboundedSender<ServerMsg>>,
     path: PathBuf,
     state: ProgressSuit<ProgressBar>,
 }
@@ -117,7 +117,7 @@ impl SocketListener {
         P: AsRef<Path>,
     {
         let listener = ManuallyDrop::new(UnixListener::bind(&path)?);
-        let (stream_read_tx, _) = unbounded_channel::<(Id, SocketMsg)>();
+        let (stream_read_tx, _) = unbounded_channel::<(Id, ClientMsg)>();
         Ok(Self {
             listener,
             stream_read_tx,
@@ -133,7 +133,7 @@ impl SocketListener {
                 // which means we should use a lock or a channel.
                 let (read, write) = stream.into_split();
                 let id = Id::generate();
-                let (write_tx, write_rx) = unbounded_channel::<SocketMsg>();
+                let (write_tx, write_rx) = unbounded_channel::<ServerMsg>();
                 tokio::spawn(read_socket(id, self.stream_read_tx.clone(), read));
                 tokio::spawn(write_socket(write_rx, write));
                 self.stream_write_txs.insert(id, write_tx);
@@ -141,7 +141,9 @@ impl SocketListener {
             Err(err) => eprintln!("Error: {}", err),
         }
     }
-    fn broadcast(&mut self, msg: SocketMsg) {
+
+    /// broadcast server message to every stream
+    fn broadcast(&mut self, msg: ServerMsg) {
         let mut error_key = Vec::new();
         if let [other @ .., (last_key, last_tx)] =
             self.stream_write_txs.iter().collect::<Vec<_>>().as_slice()
@@ -162,10 +164,10 @@ impl SocketListener {
             }
         }
     }
-
+    /// handle the original server messages, and forward them
     async fn handle_msg_and_broadcast(
         &mut self,
-        first_msg: SocketMsg,
+        first_msg: ServerMsg,
         last_send: &mut Instant,
         unhandle_latest: &mut bool,
         interval: &Duration,
@@ -183,7 +185,7 @@ impl SocketListener {
         if !self.state.is_empty() && last_send.elapsed() >= *interval {
             // send state here
             let state = self.state.state();
-            self.broadcast(SocketMsg::DownloadSync(state));
+            self.broadcast(ServerMsg::DownloadSync(state.into_boxed_slice()));
             *last_send = Instant::now();
             // reset deadline
             deadline.set_duration(*timeout);
@@ -193,13 +195,14 @@ impl SocketListener {
         }
     }
 
-    async fn receive_broadcast(&mut self, msg: SocketMsg) -> Option<SocketMsg> {
-        // here, we handle the original socket messages, and update state with them.
+    async fn receive_broadcast(&mut self, msg: ServerMsg) -> Option<ServerMsg> {
+        // here, we handle the original server messages, and update state with them.
 
         match msg {
-            SocketMsg::Download(ref download_msg) => match download_msg.state {
-                DownloadState::Start((ref name, size)) => {
-                    let bar = ProgressBar::new(name.clone(), size);
+            ServerMsg::Download(ref download_msg) => match download_msg.state {
+                DownloadState::Start(ref ptr) => {
+                    let (name, size) = ptr.as_ref();
+                    let bar = ProgressBar::new(name.to_string(), *size);
                     self.state.add(download_msg.id, bar);
                     Some(msg)
                 }
@@ -209,7 +212,7 @@ impl SocketListener {
                         if bar.is_finished() {
                             println!("remove the bar as it is finished");
                             self.state.remove(download_msg.id);
-                            let msg = SocketMsg::Download(DownloadMsg {
+                            let msg = ServerMsg::Download(DownloadMsg {
                                 id: download_msg.id,
                                 state: DownloadState::Finished,
                             });
@@ -229,21 +232,21 @@ impl SocketListener {
             _ => Some(msg),
         }
     }
-
-    async fn handle_stream_msg(&mut self, stream_msg: (Id, SocketMsg)) {
+    /// read the socket msg and handle them
+    async fn handle_stream_msg(&mut self, stream_msg: (Id, ClientMsg)) {
         let (id, msg) = stream_msg;
         match msg {
-            SocketMsg::SyncQuery => {
+            ClientMsg::SyncQuery => {
                 println!("accept sync query!");
                 if let Some(tx) = self.stream_write_txs.get(&id) {
                     let progresses = self.state.clone().to_simple_bars();
-                    tx.send_msg(SocketMsg::SyncResp(SyncInfo { progresses }));
+                    tx.send_msg(ServerMsg::SyncResp(Box::new(SyncInfo { progresses })));
                 } else {
                     eprintln!("stream write tx is closed");
                     return;
                 };
             }
-            SocketMsg::DownloadFolder(cid) => {
+            ClientMsg::DownloadFolder(cid) => {
                 let tx = if let Some(tx) = self.stream_write_txs.get(&id) {
                     tx.clone()
                 } else {
@@ -256,21 +259,35 @@ impl SocketListener {
                         let info = format!(
                             "Can not download the folder: {cid}, please check the cid and login status"
                         );
-                        tx.send_msg(SocketMsg::Error((info, e.to_string())));
+                        tx.send_msg(ServerMsg::Error(Box::new((
+                            info.into_boxed_str(),
+                            e.to_string().into_boxed_str(),
+                        ))));
                     } else {
                         println!("successfully downloaded a folder");
                         let info = format!("Successfully downloaded the folder: {cid}");
-                        tx.send_msg(SocketMsg::Ok(info));
+                        tx.send_msg(ServerMsg::Ok(info.into_boxed_str()));
                     }
                 });
             }
+            ClientMsg::LoginReq => match get_cloud_cookies().await {
+                Ok(cookies) => {
+                    if let Some(tx) = self.stream_write_txs.get(&id) {
+                        tx.send_msg(ServerMsg::Ok("Successfully logged in".into()));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("get cloud cookies error: {e}");
+                    if let Some(tx) = self.stream_write_txs.get(&id) {
+                        tx.send_msg(ServerMsg::Error(Box::new((
+                            "Failed to get cloud cookies".into(),
+                            e.to_string().into_boxed_str(),
+                        ))));
+                    }
+                }
+            },
             // no need to handle these messages
-            SocketMsg::DownloadSync(_) => (),
-            SocketMsg::Download(_) => (),
-            SocketMsg::SyncResp(_) => (),
-            SocketMsg::Null => (),
-            SocketMsg::Ok(_) => (),
-            SocketMsg::Error(_) => (),
+            ClientMsg::Null => (),
             // async fn handle_msg(msg: SocketMsg, tx: &UnboundedSender<SocketMsg>) {
             // ADD_LINK => {
             // let rss_link = stream.read_str().await?;
@@ -306,9 +323,9 @@ impl SocketListener {
 
     pub async fn listening(
         &mut self,
-        mut rx: UnboundedReceiver<SocketMsg>,
-        stream_read_tx: UnboundedSender<(Id, SocketMsg)>,
-        mut stream_read_rx: UnboundedReceiver<(Id, SocketMsg)>,
+        mut rx: UnboundedReceiver<ServerMsg>,
+        stream_read_tx: UnboundedSender<(Id, ClientMsg)>,
+        mut stream_read_rx: UnboundedReceiver<(Id, ClientMsg)>,
     ) {
         // replace the default tx
         self.stream_read_tx = stream_read_tx;
@@ -337,8 +354,8 @@ impl SocketListener {
                     println!("deadline reached!");
                     if !self.state.is_empty() && unhandle_latest{
                         // send state
-                        let state = self.state.state();
-                        self.broadcast(SocketMsg::DownloadSync(state));
+                        let state = self.state.state().into_boxed_slice();
+                        self.broadcast(ServerMsg::DownloadSync(state));
                         unhandle_latest = false;
                     }
                 }
@@ -374,21 +391,18 @@ impl Drop for SocketListener {
     }
 }
 
-pub trait WriteSocketMsg {
-    fn write_msg(
-        &mut self,
-        msg: SocketMsg,
-    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+pub trait WriteSocketMsg<T> {
+    fn write_msg(&mut self, msg: T) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }
 
-pub trait ReadSocketMsg {
-    fn read_msg(
-        &mut self,
-    ) -> impl std::future::Future<Output = Result<SocketMsg, io::Error>> + Send;
+pub trait ReadSocketMsg<T> {
+    fn read_msg(&mut self) -> impl std::future::Future<Output = Result<T, io::Error>> + Send;
 }
 
-impl<T: AsyncWriteExt + std::marker::Unpin + std::marker::Send> WriteSocketMsg for T {
-    async fn write_msg(&mut self, msg: SocketMsg) -> io::Result<()> {
+impl<T: Encode + std::marker::Send, U: AsyncWriteExt + std::marker::Unpin + std::marker::Send>
+    WriteSocketMsg<T> for U
+{
+    async fn write_msg(&mut self, msg: T) -> io::Result<()> {
         let config = bincode::config::standard().with_big_endian();
         let content = bincode::encode_to_vec(msg, config).unwrap();
         if content.len() > u32::MAX as usize {
@@ -404,8 +418,10 @@ impl<T: AsyncWriteExt + std::marker::Unpin + std::marker::Send> WriteSocketMsg f
     }
 }
 
-impl<T: AsyncReadExt + std::marker::Unpin + std::marker::Send> ReadSocketMsg for T {
-    async fn read_msg(&mut self) -> Result<SocketMsg, io::Error> {
+impl<T: Decode<()> + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + std::marker::Send>
+    ReadSocketMsg<T> for U
+{
+    async fn read_msg(&mut self) -> Result<T, io::Error> {
         let mut len_buf = [0u8; 4];
         if let Err(error) = self.read_exact(&mut len_buf).await {
             match error.kind() {
@@ -419,7 +435,7 @@ impl<T: AsyncReadExt + std::marker::Unpin + std::marker::Send> ReadSocketMsg for
         let mut content_buf = vec![0u8; u32::from_be_bytes(len_buf) as usize];
         self.read_exact(&mut content_buf).await?;
         let config = bincode::config::standard().with_big_endian();
-        let msg = bincode::decode_from_slice::<SocketMsg, _>(&content_buf, config)
+        let msg = bincode::decode_from_slice::<T, _>(&content_buf, config)
             .unwrap()
             .0;
         Ok(msg)
@@ -486,16 +502,44 @@ impl OneShotSleep {
     }
 }
 
+// #[derive(Encode, Decode, Debug, Clone)]
+// pub enum SocketMsg {
+//     Download(DownloadMsg),
+//     /// - cid
+//     DownloadFolder(String),
+//     LoginReq,
+//     LoginUrl(String),
+//     LoginState(String),
+//     Ok(String),
+//     Info(String),
+//     /// - (error_info, error)
+//     Error((String, String)),
+//     DownloadSync(Vec<ProgressState>),
+//     SyncQuery,
+//     SyncResp(SyncInfo),
+//     Null,
+// }
+
 #[derive(Encode, Decode, Debug, Clone)]
-pub enum SocketMsg {
+pub enum ServerMsg {
     Download(DownloadMsg),
+    LoginUrl(Box<str>),
+    LoginState(Box<str>),
+    Ok(Box<str>),
+    Info(Box<str>),
+    /// - (error_info, error)
+    Error(Box<(Box<str>, Box<str>)>),
+    DownloadSync(Box<[ProgressState]>),
+    SyncResp(Box<SyncInfo>),
+    Null,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub enum ClientMsg {
     /// - cid
-    DownloadFolder(String),
-    Ok(String),
-    Error((String, String)),
-    DownloadSync(Vec<ProgressState>),
+    DownloadFolder(Box<str>),
+    LoginReq,
     SyncQuery,
-    SyncResp(SyncInfo),
     Null,
 }
 
@@ -510,7 +554,7 @@ pub struct DownloadMsg {
 pub enum DownloadState {
     /// - `String`: file name
     /// - `u64`: file size
-    Start((String, u64)),
+    Start(Box<(Box<str>, u64)>),
     /// - increment size
     Downloading(u64),
     Finished,
