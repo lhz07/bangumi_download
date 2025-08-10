@@ -6,7 +6,7 @@ use std::{
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color as RColor, Stylize},
-    widgets::{Block, Paragraph, StatefulWidget, Widget, Wrap},
+    widgets::{Block, Clear, Paragraph, StatefulWidget, Widget, Wrap},
 };
 
 pub struct Notification {
@@ -115,7 +115,8 @@ impl StatefulWidget for NotificationWidget {
         let area = Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(40)])
             .split(vertical)[1];
         let block = Block::bordered().title(state.title.clone());
-        let color = Color(20, 206, 247);
+        // let color = Color(20, 206, 247);
+        let color = Color(255, 255, 255);
         let fg = match state.instant {
             Some(instant) => {
                 let age = instant.elapsed();
@@ -138,6 +139,9 @@ impl StatefulWidget for NotificationWidget {
                 color // new notification
             }
         };
+        // clear the area to ensure we are on the top
+        let clear = Clear;
+        clear.render(area, buf);
         let para = Paragraph::new(state.content.clone())
             .block(block)
             .wrap(Wrap { trim: true })

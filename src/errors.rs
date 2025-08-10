@@ -12,6 +12,8 @@ pub enum CatError {
     Join(#[from] tokio::task::JoinError),
     #[error("Bangumi parse error: {0}")]
     Parse(String),
+    #[error("RSS link parse error: {0}")]
+    RssLinkParse(#[from] url::ParseError),
     #[error(transparent)]
     Cloud(#[from] CloudError),
     #[error("Get cookie error: {0}")]

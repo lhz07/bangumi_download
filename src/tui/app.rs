@@ -1,9 +1,9 @@
 use std::{collections::VecDeque, io, time::Duration};
 
 use crate::{
-    END_NOTIFY,
+    END_NOTIFY, READY_TO_EXIT,
     config_manager::SafeSend,
-    socket_utils::{ClientMsg, ReadSocketMsg, SocketPath, WriteSocketMsg},
+    socket_utils::{AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, SocketPath},
     tui::{
         events::LEvent,
         notification_widget::Notification,
@@ -65,6 +65,7 @@ pub struct Handles {
 pub struct App {
     pub(crate) current_screen: CurrentScreen,
     pub(crate) current_popup: Option<Popup>,
+    pub(crate) qrcode_url: Result<Box<str>, &'static str>,
     pub(crate) input_state: InputState,
     pub(crate) terminal: DefaultTerminal,
     pub(crate) downloading_state: ListState,
@@ -84,9 +85,6 @@ impl App {
 
         // Set default level for unknown targets to Trace
         tui_logger::set_default_level(log::LevelFilter::Trace);
-        for i in 1..50 {
-            log::info!("{i}");
-        }
         let downloading_state = ListState::new();
         let finished_state = ListState::new();
         // the event loop chanel
@@ -107,6 +105,7 @@ impl App {
         let app = App {
             current_screen: CurrentScreen::Main,
             current_popup: None,
+            qrcode_url: Err("Loading..."),
             input_state: InputState::NotInput,
             terminal,
             downloading_state,
@@ -119,15 +118,23 @@ impl App {
         (app, event_rx, handles)
     }
     pub async fn receive_ui_events(tx: UnboundedSender<LEvent>) -> io::Result<()> {
+        let wait_poll = async || event::poll(Duration::from_millis(50));
         loop {
-            if event::poll(Duration::from_millis(50))? {
-                let event = LEvent::Tui(event::read()?);
-                tx.send_msg(event);
-            }
-            let event = LEvent::Render;
-            if let Err(e) = tx.send(event) {
-                log::error!("It seems that the Receiver of LEvent is closed too early, error: {e}");
-                break;
+            select! {
+                poll = wait_poll() => {
+                    if poll? {
+                        let event = LEvent::Tui(event::read()?);
+                        tx.send_msg(event);
+                    }
+                    let event = LEvent::Render;
+                    if let Err(e) = tx.send(event) {
+                        log::error!("It seems that the Receiver of LEvent is closed too early, error: {e}");
+                        break;
+                    }
+                }
+                _ = END_NOTIFY.notified() => {
+                    break;
+                }
             }
         }
         Ok(())
@@ -144,8 +151,9 @@ impl App {
             Self::write_socket(rx, write),
         )
         .await;
+        let read_result = read_result.inspect_err(|e| log::error!("socket read error: {e}"));
+        write_result.inspect_err(|e| log::error!("socket write error: {e}"))?;
         read_result?;
-        write_result?;
         Ok(())
     }
     pub async fn read_socket(
@@ -155,7 +163,16 @@ impl App {
         loop {
             select! {
                 result = read.read_msg() => {
-                    tx.send_msg(LEvent::Socket(result?));
+                    match result {
+                        Ok(msg) => tx.send_msg(LEvent::Socket(msg)),
+                        Err(e) => {
+                            if READY_TO_EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            } else {
+                                Err(e)?;
+                            }
+                        }
+                    }
                 }
                 _ = END_NOTIFY.notified() => {break;}
             }

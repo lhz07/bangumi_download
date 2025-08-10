@@ -105,4 +105,4 @@ pub static REFRESH_DOWNLOAD_SLOW: Lazy<Mutex<Option<JoinHandle<Result<(), CatErr
     Lazy::new(|| Mutex::new(None));
 pub static REFRESH_NOTIFY: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(0));
 pub static END_NOTIFY: Lazy<Notify> = Lazy::new(|| Notify::new());
-pub static EXIT_NOW: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+pub static READY_TO_EXIT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));

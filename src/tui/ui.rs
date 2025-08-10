@@ -74,13 +74,6 @@ pub fn render(app: &mut App) -> io::Result<()> {
         let tab_content_area = main_layout[1];
         f.render_widget(tabs, tab_title_area);
 
-        if let Some(noti) = app.notifications_queue.front_mut() {
-            f.render_stateful_widget(NotificationWidget, tab_content_area, noti);
-            if noti.should_disappear() {
-                app.notifications_queue.pop_front();
-            }
-        }
-
         if app.current_screen != CurrentScreen::Downloading {
             app.downloading_state
                 .progress_suit
@@ -143,7 +136,7 @@ pub fn render(app: &mut App) -> io::Result<()> {
                             ])
                             .split(vertical_layout[1]);
                             let popup_area = horizontal_layout[1];
-                            let qrcode = qrcode_widget::QrcodeWidget::new();
+                            let qrcode = qrcode_widget::QrcodeWidget::new(&app.qrcode_url);
                             f.render_widget(qrcode, popup_area);
                         }
                     }
@@ -232,6 +225,12 @@ pub fn render(app: &mut App) -> io::Result<()> {
                     .block(Block::default().title("Logs").borders(Borders::ALL))
                     .state(&app.log_widget_state);
                 f.render_widget(logs, tab_content_area);
+            }
+        }
+        if let Some(noti) = app.notifications_queue.front_mut() {
+            f.render_stateful_widget(NotificationWidget, tab_content_area, noti);
+            if noti.should_disappear() {
+                app.notifications_queue.pop_front();
             }
         }
     })?;

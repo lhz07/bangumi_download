@@ -17,11 +17,10 @@ use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    cell::Cell,
     collections::HashMap,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 use std::{fs as sfs, str::FromStr};
@@ -119,13 +118,15 @@ pub fn extract_magnet_hash(link: &str) -> Option<String> {
 }
 
 pub async fn get_cloud_cookies() -> Result<String, CatError> {
-    let try_times = Cell::new(0);
-    match Retry::spawn(FixedInterval::from_millis(5000).take(5), async || {
-        if try_times.get() > 0 {
-            eprintln!("Failed to login, waiting for retry.");
+    let try_times = AtomicBool::new(false);
+    match Retry::spawn(FixedInterval::from_millis(5000).take(2), async || {
+        if try_times.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("waiting for retry...");
         }
-        try_times.set(1);
-        login_with_qrcode("alipaymini").await
+        try_times.store(true, std::sync::atomic::Ordering::Relaxed);
+        login_with_qrcode("alipaymini").await.inspect_err(|e| {
+            eprintln!("Login with qrcode failed, error: {e}");
+        })
     })
     .await
     {

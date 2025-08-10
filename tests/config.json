@@ -32,9 +32,25 @@
   "hash_ani_slow": {},
   "magnets": {},
   "rss_links": {
-    "[MingYSub] 莉可丽丝：友谊是时间的窃贼": "https://mikanime.tv/RSS/Bangumi?bangumiId=3644&subgroupid=576",
-    "[北宇治字幕组] 坂本日常": "https://mikanime.tv/RSS/Bangumi?bangumiId=3523&subgroupid=611",
-    "[喵萌奶茶屋] 时光流逝，饭菜依旧美味": "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=382",
-    "[LoliHouse] 时光流逝，饭菜依旧美味": "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=370"
+    "261&42": [
+      "[诸神字幕组] 中二病也要谈恋爱！恋",
+      "https://mikanime.tv/RSS/Bangumi?bangumiId=261&subgroupid=42"
+    ],
+    "3623&370": [
+      "[LoliHouse] 时光流逝，饭菜依旧美味",
+      "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=370"
+    ],
+    "3644&576": [
+      "[MingYSub] 莉可丽丝：友谊是时间的窃贼",
+      "https://mikanime.tv/RSS/Bangumi?bangumiId=3644&subgroupid=576"
+    ],
+    "3623&382": [
+      "[喵萌奶茶屋] 时光流逝，饭菜依旧美味",
+      "https://mikanime.tv/RSS/Bangumi?bangumiId=3623&subgroupid=382"
+    ],
+    "3523&611": [
+      "[北宇治字幕组] 坂本日常",
+      "https://mikanime.tv/RSS/Bangumi?bangumiId=3523&subgroupid=611"
+    ]
   }
 }

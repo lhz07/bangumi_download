@@ -28,9 +28,9 @@ pub struct Config {
     /// - `key`: bangumi name
     /// - `value`: `Vec<MagnetLink>`
     pub magnets: HashMap<String, Vec<String>>,
-    /// - `key`: bangumi name
-    /// - `value`: rss link
-    pub rss_links: HashMap<String, String>,
+    /// - `key`: bangumi ID
+    /// - `value`: (bangumi name, rss link)
+    pub rss_links: HashMap<String, (String, String)>,
 }
 
 pub trait Remove<T> {

@@ -1,7 +1,7 @@
-use std::io;
+use std::{io, time::Duration};
 
 use crate::{
-    END_NOTIFY,
+    END_NOTIFY, READY_TO_EXIT,
     config_manager::SafeSend,
     socket_utils::{ClientMsg, DownloadState, ServerMsg},
     tui::{
@@ -96,6 +96,7 @@ impl LEvent {
                         }
                         ServerMsg::SyncResp(info) => {
                             app.downloading_state.progress_suit = info.progresses;
+                            log::info!("{:#?}", info.animes);
                         }
                         ServerMsg::Ok(info) => {
                             log::info!("{}", info);
@@ -108,11 +109,31 @@ impl LEvent {
                             let noti = Notification::new("Failed".to_string(), info.into_string());
                             app.notifications_queue.push_back(noti);
                         }
-                        ServerMsg::Info(info) => {}
-                        ServerMsg::LoginState(state) => {}
-                        ServerMsg::LoginUrl(url) => {}
-                        // no need to handle these messages
-                        ServerMsg::Null => (),
+                        ServerMsg::Info(info) => {
+                            log::info!("{}", info);
+                            let noti = Notification::new("Info".to_string(), info.into_string());
+                            app.notifications_queue.push_back(noti);
+                        }
+                        ServerMsg::LoginState(state) => {
+                            log::info!("Login state: {}", state);
+                            let noti =
+                                Notification::new("Login State".to_string(), state.into_string())
+                                    .duration(Duration::from_secs(2));
+                            app.notifications_queue.push_back(noti);
+                        }
+                        ServerMsg::QrcodeExpired => {
+                            app.qrcode_url = Err("Qrcode expired, please reopen the login popup");
+                        }
+                        ServerMsg::LoginUrl(url) => {
+                            log::info!("Login URL: {}", url);
+                            app.qrcode_url = Ok(url);
+                        }
+                        ServerMsg::Exit => {
+                            log::info!("Received exit message, exiting...");
+                            READY_TO_EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
+                            END_NOTIFY.notify_waiters();
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -140,6 +161,10 @@ impl LEvent {
                         // press 'q' to exit
                         'q' => {
                             if let None = app.current_popup {
+                                READY_TO_EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
+                                app.socket_tx.send_msg(ClientMsg::Exit);
+                                // wait for the exit message to be handled
+                                std::thread::sleep(Duration::from_millis(50));
                                 END_NOTIFY.notify_waiters();
                                 return true;
                             }
@@ -160,13 +185,14 @@ impl LEvent {
                         char if app.current_screen == CurrentScreen::Main => {
                             match char {
                                 // download a folder
-                                'd' => {
+                                'd' if app.current_popup.is_none() => {
                                     app.input_state = InputState::Text(String::new());
                                     app.current_popup = Some(Popup::DownloadFolder);
                                 }
                                 // login to cloud
-                                'l' => {
+                                'l' if app.current_popup.is_none() => {
                                     app.current_popup = Some(Popup::Login);
+                                    app.socket_tx.send_msg(ClientMsg::LoginReq);
                                 }
                                 _ => (),
                             }

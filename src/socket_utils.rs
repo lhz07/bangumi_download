@@ -3,28 +3,31 @@ use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use std::{env::temp_dir, fs, path::PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::net::unix::SocketAddr;
 use tokio::select;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio::{
     io::{self, AsyncReadExt},
     net::UnixListener,
 };
 
-use crate::END_NOTIFY;
 use crate::cloud_manager::{download_a_folder, get_cloud_cookies};
-use crate::config_manager::SafeSend;
+use crate::config_manager::{CONFIG, Config, Message, SafeSend};
 use crate::errors::SocketError;
 use crate::id::Id;
 use crate::main_proc::{read_socket, write_socket};
 use crate::tui::progress_bar::{
     BasicBar, Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar,
 };
+use crate::{BROADCAST_TX, END_NOTIFY, TX};
 
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
@@ -34,7 +37,11 @@ pub trait SocketStateDetect {
         P: AsRef<Path>,
     {
         match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => SocketState::Working,
+            Ok(mut stream) => {
+                // to exit this test stream elegantly
+                let _ = stream.write_msg(ClientMsg::Exit);
+                SocketState::Working
+            }
             Err(error) => match error.kind() {
                 io::ErrorKind::ConnectionRefused => SocketState::Discarded,
                 io::ErrorKind::NotFound => SocketState::NotFound,
@@ -102,6 +109,11 @@ impl SocketStateDetect for SocketPath {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+pub enum HandleType {
+    Login,
+}
+
 // SocketListener ------------------------------------------------
 pub struct SocketListener {
     listener: ManuallyDrop<UnixListener>,
@@ -109,6 +121,7 @@ pub struct SocketListener {
     stream_write_txs: HashMap<Id, UnboundedSender<ServerMsg>>,
     path: PathBuf,
     state: ProgressSuit<ProgressBar>,
+    handles: HashMap<HandleType, JoinHandle<()>>,
 }
 
 impl SocketListener {
@@ -124,6 +137,7 @@ impl SocketListener {
             stream_write_txs: HashMap::new(),
             path: path.as_ref().to_path_buf(),
             state: ProgressSuit::new(),
+            handles: HashMap::new(),
         })
     }
     async fn accept_stream(&mut self, accept_result: io::Result<(UnixStream, SocketAddr)>) {
@@ -235,89 +249,127 @@ impl SocketListener {
     /// read the socket msg and handle them
     async fn handle_stream_msg(&mut self, stream_msg: (Id, ClientMsg)) {
         let (id, msg) = stream_msg;
+        // state sync message should be send to the exact stream, but other messages
+        // should be broadcasted to all streams
+
+        // NOTICE: this is under a tokio::select,
+        // so any task that takes a long time should use tokio::spawn
         match msg {
             ClientMsg::SyncQuery => {
                 println!("accept sync query!");
                 if let Some(tx) = self.stream_write_txs.get(&id) {
                     let progresses = self.state.clone().to_simple_bars();
-                    tx.send_msg(ServerMsg::SyncResp(Box::new(SyncInfo { progresses })));
+                    let config = CONFIG.load();
+                    let last_updates = &config.bangumi;
+                    let animes = config
+                        .rss_links
+                        .iter()
+                        .map(|(id, (name, _))| {
+                            let last_update = match last_updates.get(id) {
+                                Some(str) => str.clone(),
+                                None => String::new(),
+                            };
+                            Anime {
+                                name: name.clone(),
+                                last_update,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    tx.send_msg(ServerMsg::SyncResp(Box::new(SyncInfo {
+                        progresses,
+                        animes,
+                    })));
                 } else {
                     eprintln!("stream write tx is closed");
                     return;
                 };
             }
             ClientMsg::DownloadFolder(cid) => {
-                let tx = if let Some(tx) = self.stream_write_txs.get(&id) {
-                    tx.clone()
-                } else {
-                    eprintln!("stream write tx is closed");
-                    return;
-                };
                 tokio::spawn(async move {
                     if let Err(e) = download_a_folder(&cid, None).await {
                         eprintln!("download a folder error: {e}");
                         let info = format!(
                             "Can not download the folder: {cid}, please check the cid and login status"
                         );
-                        tx.send_msg(ServerMsg::Error(Box::new((
+                        BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((
                             info.into_boxed_str(),
                             e.to_string().into_boxed_str(),
                         ))));
                     } else {
                         println!("successfully downloaded a folder");
                         let info = format!("Successfully downloaded the folder: {cid}");
-                        tx.send_msg(ServerMsg::Ok(info.into_boxed_str()));
+                        BROADCAST_TX.send_msg(ServerMsg::Ok(info.into_boxed_str()));
                     }
                 });
             }
-            ClientMsg::LoginReq => match get_cloud_cookies().await {
-                Ok(cookies) => {
-                    if let Some(tx) = self.stream_write_txs.get(&id) {
-                        tx.send_msg(ServerMsg::Ok("Successfully logged in".into()));
-                    }
+            ClientMsg::LoginReq => {
+                if self
+                    .handles
+                    .get(&HandleType::Login)
+                    .is_some_and(|h| !h.is_finished())
+                {
+                    eprintln!("Login handle is already running, ignoring the request");
+                } else {
+                    let handle = tokio::spawn(async {
+                        match get_cloud_cookies().await {
+                            Ok(cookies) => {
+                                let cmd = Box::new(|config: &mut Config| {
+                                    config.cookies = cookies;
+                                });
+                                let notify = Arc::new(Notify::new());
+                                let msg = Message::new(cmd, Some(notify.clone()));
+                                TX.load().as_ref().unwrap().send_msg(msg);
+                                notify.notified().await;
+                                BROADCAST_TX
+                                    .send_msg(ServerMsg::Ok("Successfully logged in".into()));
+                            }
+                            Err(e) => {
+                                eprintln!("get cloud cookies error: {e}");
+                                BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((
+                                    "Failed to get cloud cookies".into(),
+                                    e.to_string().into_boxed_str(),
+                                ))));
+                                BROADCAST_TX.send_msg(ServerMsg::QrcodeExpired);
+                            }
+                        }
+                    });
+                    self.handles.insert(HandleType::Login, handle);
                 }
-                Err(e) => {
-                    eprintln!("get cloud cookies error: {e}");
-                    if let Some(tx) = self.stream_write_txs.get(&id) {
-                        tx.send_msg(ServerMsg::Error(Box::new((
-                            "Failed to get cloud cookies".into(),
-                            e.to_string().into_boxed_str(),
-                        ))));
-                    }
-                }
-            },
+            }
             // no need to handle these messages
-            ClientMsg::Null => (),
-            // async fn handle_msg(msg: SocketMsg, tx: &UnboundedSender<SocketMsg>) {
-            // ADD_LINK => {
-            // let rss_link = stream.read_str().await?;
-            // let client = CLIENT_WITH_RETRY.clone();
-            // match check_rss_link(&rss_link, client).await {
-            //     Ok(()) => {
-            // let temp_tx = TX.load();
-            // let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
-            // let old_config = CONFIG.load_full();
-            // let rss_update = async || -> Result<(), CatError> {
-            //     rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
-            // .await?;
-            //     restart_refresh_download().await?;
-            //     restart_refresh_download_slow().await?;
-            //     Ok(())
-            // };
-            // if let Err(e) = rss_update().await {
-            //     eprintln!("add link error: {e}");
-            // }
-            //     }
-            //     Err(error) => stream.write_str(&error).await?,
-            // }
-            //     }
-            //     DOWNLOAD_FOLDER => {
-            // let cid = stream.read_str().await?;
-            // if let Err(e) = download_a_folder(&cid, None).await {
-            //     stream.write_str(&e.to_string()).await?;
-            // }
-            //     }
-            // }
+            ClientMsg::Exit => {
+                println!("Received client exit message");
+                self.stream_write_txs.remove(&id);
+            } // async fn handle_msg(msg: SocketMsg, tx: &UnboundedSender<SocketMsg>) {
+              // ADD_LINK => {
+              // let rss_link = stream.read_str().await?;
+              // let client = CLIENT_WITH_RETRY.clone();
+              // match check_rss_link(&rss_link, client).await {
+              //     Ok(()) => {
+              // let temp_tx = TX.load();
+              // let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
+              // let old_config = CONFIG.load_full();
+              // let rss_update = async || -> Result<(), CatError> {
+              //     rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
+              // .await?;
+              //     restart_refresh_download().await?;
+              //     restart_refresh_download_slow().await?;
+              //     Ok(())
+              // };
+              // if let Err(e) = rss_update().await {
+              //     eprintln!("add link error: {e}");
+              // }
+              //     }
+              //     Err(error) => stream.write_str(&error).await?,
+              // }
+              //     }
+              //     DOWNLOAD_FOLDER => {
+              // let cid = stream.read_str().await?;
+              // if let Err(e) = download_a_folder(&cid, None).await {
+              //     stream.write_str(&e.to_string()).await?;
+              // }
+              //     }
+              // }
         }
     }
 
@@ -359,7 +411,10 @@ impl SocketListener {
                         unhandle_latest = false;
                     }
                 }
-                _ = END_NOTIFY.notified() => {}
+                _ = END_NOTIFY.notified() => {
+                    println!("Socket listener is exiting...");
+                    break;
+                }
             }
         }
     }
@@ -391,16 +446,20 @@ impl Drop for SocketListener {
     }
 }
 
-pub trait WriteSocketMsg<T> {
+pub trait AsyncWriteSocketMsg<T> {
     fn write_msg(&mut self, msg: T) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }
 
-pub trait ReadSocketMsg<T> {
+pub trait WriteSocketMsg<T> {
+    fn write_msg(&mut self, msg: T) -> std::io::Result<()>;
+}
+
+pub trait AsyncReadSocketMsg<T> {
     fn read_msg(&mut self) -> impl std::future::Future<Output = Result<T, io::Error>> + Send;
 }
 
 impl<T: Encode + std::marker::Send, U: AsyncWriteExt + std::marker::Unpin + std::marker::Send>
-    WriteSocketMsg<T> for U
+    AsyncWriteSocketMsg<T> for U
 {
     async fn write_msg(&mut self, msg: T) -> io::Result<()> {
         let config = bincode::config::standard().with_big_endian();
@@ -418,8 +477,24 @@ impl<T: Encode + std::marker::Send, U: AsyncWriteExt + std::marker::Unpin + std:
     }
 }
 
+impl<T: Encode + std::marker::Send, U: std::io::Write> WriteSocketMsg<T> for U {
+    fn write_msg(&mut self, msg: T) -> io::Result<()> {
+        let config = bincode::config::standard().with_big_endian();
+        let content = bincode::encode_to_vec(msg, config).unwrap();
+        if content.len() > u32::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("content length must be less than {} bytes", u32::MAX),
+            ));
+        }
+        self.write_all(&(content.len() as u32).to_be_bytes())?;
+        self.write_all(&content)?;
+        Ok(())
+    }
+}
+
 impl<T: Decode<()> + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + std::marker::Send>
-    ReadSocketMsg<T> for U
+    AsyncReadSocketMsg<T> for U
 {
     async fn read_msg(&mut self) -> Result<T, io::Error> {
         let mut len_buf = [0u8; 4];
@@ -502,36 +577,19 @@ impl OneShotSleep {
     }
 }
 
-// #[derive(Encode, Decode, Debug, Clone)]
-// pub enum SocketMsg {
-//     Download(DownloadMsg),
-//     /// - cid
-//     DownloadFolder(String),
-//     LoginReq,
-//     LoginUrl(String),
-//     LoginState(String),
-//     Ok(String),
-//     Info(String),
-//     /// - (error_info, error)
-//     Error((String, String)),
-//     DownloadSync(Vec<ProgressState>),
-//     SyncQuery,
-//     SyncResp(SyncInfo),
-//     Null,
-// }
-
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum ServerMsg {
     Download(DownloadMsg),
     LoginUrl(Box<str>),
     LoginState(Box<str>),
+    QrcodeExpired,
     Ok(Box<str>),
     Info(Box<str>),
     /// - (error_info, error)
     Error(Box<(Box<str>, Box<str>)>),
     DownloadSync(Box<[ProgressState]>),
     SyncResp(Box<SyncInfo>),
-    Null,
+    Exit,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -540,7 +598,7 @@ pub enum ClientMsg {
     DownloadFolder(Box<str>),
     LoginReq,
     SyncQuery,
-    Null,
+    Exit,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -548,6 +606,12 @@ pub struct DownloadMsg {
     /// - task id
     pub id: Id,
     pub state: DownloadState,
+}
+
+#[derive(Encode, Decode, Debug, Clone)]
+pub struct Anime {
+    pub name: String,
+    pub last_update: String,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -563,4 +627,5 @@ pub enum DownloadState {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct SyncInfo {
     pub progresses: ProgressSuit<SimpleBar>,
+    pub animes: Vec<Anime>,
 }

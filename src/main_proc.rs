@@ -20,7 +20,7 @@ use crate::{
     config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
     errors::{CatError, CloudError, DownloadError},
     id::Id,
-    socket_utils::{ClientMsg, ReadSocketMsg, ServerMsg, WriteSocketMsg},
+    socket_utils::{AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, ServerMsg},
     update_rss::start_rss_receive,
 };
 
@@ -94,7 +94,7 @@ pub async fn refresh_rss() {
     loop {
         println!("\nChecking updates...\n");
         let rss_links = &CONFIG.load_full().rss_links;
-        let urls = rss_links.values().collect::<Vec<&String>>();
+        let urls = rss_links.values().map(|(_, url)| url).collect::<Vec<_>>();
         if let Err(e) = start_rss_receive(urls).await {
             eprintln!("start rss receive error: {}", e);
             END_NOTIFY.notify_waiters();
@@ -391,7 +391,13 @@ pub async fn read_socket(
     loop {
         select! {
             result = read.read_msg() => {
-                tx.send_msg((id, result?));
+                let msg = result?;
+                let to_exit = matches!(&msg, ClientMsg::Exit);
+                tx.send_msg((id, msg));
+                if to_exit {
+                    println!("read msg from socket exit!");
+                    break;
+                }
             }
             _ = END_NOTIFY.notified() => {break;}
         }

@@ -6,7 +6,10 @@ use crate::{
     cloud_manager::{download_a_folder, get_file_info, list_all_files, list_files},
     config_manager::Config,
     id::Id,
-    socket_utils::{DownloadMsg, DownloadState, ReadSocketMsg, SocketPath, WriteSocketMsg},
+    socket_utils::{
+        AsyncReadSocketMsg, AsyncWriteSocketMsg, DownloadMsg, DownloadState, SocketPath,
+    },
+    update_rss::parse_url,
 };
 use config_manager::*;
 use quick_xml::de;
@@ -43,7 +46,7 @@ async fn test_get_a_magnet_link() {
 }
 
 #[tokio::test]
-async fn test_check_rss_link() {
+async fn test_check_rss_link_and_url_parse() {
     use crate::update_rss::check_rss_link;
     let urls = [
         "https://mikanime.tv/RSS/Bangumi?bangumiId=3644&subgroupid=1230",
@@ -93,7 +96,50 @@ async fn test_check_rss_link() {
     for i in 0..urls.iter().count() {
         assert_eq!(check_results[i], results[i]);
         println!("{:?}", check_results[i]);
-        println!("Success: {}", i);
+        println!("check url success: {}", i);
+    }
+
+    // test parse_url
+    let urls = [
+        "https://mikanime.tv/RSS/Bangumi?bangumiId=3644&subgroupid=1230",
+        "https://mikanime.tv/RSS/Bangumi?bangumiId=3644&subgroupid=1230",
+        "http://mikanime.tv/RSS/Bangumi?subgroupid=1230&bangumiId=3644",
+        "mikanime.tv/RSS/Bangumi?subgroupid=1230&bangumiId=3644",
+        "https://mikanime.tv/RSS/Bangumi?bangumiId=2",
+        "https://mikanime.tv/RSS/Bangumi?subgroupid=3&other=1",
+    ];
+    for (i, url) in urls.iter().enumerate() {
+        let result = parse_url(url);
+        println!("parse url result: {} {:?}", i, result);
+        match i {
+            0 | 1 | 2 => {
+                // Expect Ok(("3644", "1230"))
+                assert!(matches!(
+                    result,
+                    Ok((ref a, ref b)) if a == "3644" && b == "1230"
+                ));
+            }
+            3 => {
+                // This URL lacks scheme -> we expect Err(RssLinkParse(_))
+                assert!(matches!(result, Err(CatError::RssLinkParse(_))));
+            }
+            4 => {
+                // Missing subgroupid -> expect that specific parse error
+                assert!(matches!(
+                    result,
+                    Err(CatError::Parse(ref msg)) if msg == "missing subgroupid"
+                ));
+            }
+            5 => {
+                // Missing bangumiId -> expect that specific parse error
+                assert!(matches!(
+                    result,
+                    Err(CatError::Parse(ref msg)) if msg == "missing bangumiId"
+                ));
+            }
+            _ => unreachable!(),
+        }
+        println!("parse url success: {}", i);
     }
 }
 

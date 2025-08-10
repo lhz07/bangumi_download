@@ -1,14 +1,15 @@
 use std::{io, mem::ManuallyDrop, process::ExitCode};
 
 use bangumi_download::{
-    BROADCAST_RX, BROADCAST_TX, END_NOTIFY, ERROR_STATUS, EXIT_NOW, TX,
+    BROADCAST_RX, BROADCAST_TX, END_NOTIFY, ERROR_STATUS, TX,
+    config_manager::SafeSend,
     id::Id,
     main_proc::initialize,
-    socket_utils::{ClientMsg, SocketPath, SocketState, SocketStateDetect},
+    socket_utils::{ClientMsg, ServerMsg, SocketPath, SocketState, SocketStateDetect},
     tui::{app::App, events::LEvent},
 };
 use futures::future::join3;
-use tokio::{signal, sync::mpsc::unbounded_channel};
+use tokio::sync::mpsc::unbounded_channel;
 
 // we need to give the macro a var or let it use the global var
 // macro_rules! printf {
@@ -35,13 +36,20 @@ async fn main() -> ExitCode {
         .await;
         ratatui::restore();
         let check_results = || -> Result<(), io::Error> {
-            results.0?;
-            results.1.unwrap()?;
-            results.2.unwrap()?;
+            results
+                .0
+                .inspect_err(|e| eprintln!("event loop error: {e}"))?;
+            results
+                .1
+                .unwrap()
+                .inspect_err(|e| eprintln!("socket error: {e}"))?;
+            results
+                .2
+                .unwrap()
+                .inspect_err(|e| eprintln!("ui events handle error: {e}"))?;
             Ok(())
         };
-        if let Err(e) = check_results() {
-            log::error!("Error: {e}");
+        if check_results().is_err() {
             return ExitCode::FAILURE;
         }
         return ExitCode::SUCCESS;
@@ -53,8 +61,27 @@ async fn main() -> ExitCode {
             BROADCAST_RX = std::ptr::null_mut();
             rx
         };
-        let (stream_read_tx, stream_read_rx) = unbounded_channel::<(Id, ClientMsg)>();
-        let config_manager = initialize().await;
+
+        let mut exit_now = false;
+        ctrlc::set_handler(move || {
+            if exit_now {
+                println!("force quit!");
+                std::process::exit(1);
+            } else {
+                println!("\nExiting...");
+                BROADCAST_TX.send_msg(ServerMsg::Exit);
+                exit_now = true;
+                // wait for handling the exit message
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                END_NOTIFY.notify_waiters();
+                // The 2 lines below will end the process!
+                println!("try to drop TX");
+                drop(TX.swap(None));
+                println!("dropped TX, waiting for config_manager to finish...");
+            }
+        })
+        .unwrap();
+
         let mut listener = match socket_path.initial_listener() {
             Ok(listener) => listener,
             Err(e) => {
@@ -62,27 +89,12 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        ctrlc::set_handler(|| {
-            if EXIT_NOW.load(std::sync::atomic::Ordering::Relaxed) {
-                println!("force quit!");
-                std::process::exit(1);
-            }
-        })
-        .unwrap();
-        tokio::select! {
-            _ = signal::ctrl_c() => {
-                println!("\nExiting...");
-                EXIT_NOW.store(true, std::sync::atomic::Ordering::Relaxed);
-                drop(listener);
-                END_NOTIFY.notify_waiters();
-                // The 2 lines below will end the process!
-                println!("try to drop TX");
-                drop(TX.swap(None));
-                println!("dropped TX, waiting for config_manager to finish...");
-                config_manager.await.unwrap();
-            },
-            _ = listener.listening(rx, stream_read_tx, stream_read_rx) => {}
-        }
+
+        let config_manager = initialize().await;
+        let (stream_read_tx, stream_read_rx) = unbounded_channel::<(Id, ClientMsg)>();
+        listener.listening(rx, stream_read_tx, stream_read_rx).await;
+        drop(listener);
+        config_manager.await.unwrap();
     }
     if ERROR_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
         return ExitCode::FAILURE;

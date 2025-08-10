@@ -8,6 +8,7 @@ use crate::{
 use futures::future::{self, join_all};
 use quick_xml::de;
 use regex::Regex;
+use reqwest::Url;
 use reqwest_middleware::ClientWithMiddleware;
 use scraper::{Element, Html, Selector};
 use serde::Deserialize;
@@ -229,9 +230,10 @@ pub async fn get_a_magnet_link(
 
 pub async fn check_rss_link(url: &str, client: &ClientWithMiddleware) -> Result<(), String> {
     let pattern = Regex::new(r"^https?://mikanime\.tv/RSS/Bangumi\?(bangumiId=\d+&subgroupid=\d+|subgroupid=\d+&bangumiId=\d+)$").expect("regex should be valid!");
-    if let None = pattern.captures(url) {
+    if pattern.captures(url).is_none() {
         return Err("Invalid url!".into());
     }
+    parse_url(url).map_err(|e| e.to_string())?;
     let response = match get_response_text(url, client).await {
         Ok(response) => response,
         Err(error) => return Err(format!("can not visit rss url, error: {}", error).into()),
@@ -240,6 +242,22 @@ pub async fn check_rss_link(url: &str, client: &ClientWithMiddleware) -> Result<
         Ok(_) => Ok(()),
         Err(error) => Err(format!("can not get correct info from the link, please check bangumiId and subgroupid! Error: {}", error).into())
     }
+}
+
+pub fn parse_url(url: &str) -> Result<(String, String), CatError> {
+    let parsed = Url::parse(url)?;
+    let (mut ani_id, mut sub_id) = (
+        Err(CatError::Parse("missing bangumiId".to_string())),
+        Err(CatError::Parse("missing subgroupid".to_string())),
+    );
+    for (key, value) in parsed.query_pairs() {
+        if key == "bangumiId" {
+            ani_id = Ok(value.into_owned());
+        } else if key == "subgroupid" {
+            sub_id = Ok(value.into_owned());
+        }
+    }
+    Ok((ani_id?, sub_id?))
 }
 
 pub async fn rss_receive(
@@ -255,19 +273,13 @@ pub async fn rss_receive(
     let latest_item = items
         .first()
         .ok_or(CatError::Parse("can not found latest item!".to_string()))?;
-    let parse_link = async || -> Option<(&str, &str, String, &str)> {
-        let mut split_ani_sub = channel
-            .link
-            .split("bangumiId=")
-            .nth(1)?
-            .split("&subgroupid=");
-        let ani_id = split_ani_sub.next()?;
-        let sub_id = split_ani_sub.next()?;
+    let (ani_id, sub_id) = parse_url(&channel.link)?;
+    let parse_link = async || -> Option<(String, &str)> {
         let sub_name = get_subgroup_name(&latest_item.link, client).await?;
         let bangumi_name = channel.title.split(" - ").nth(1).unwrap_or(&channel.title);
-        Some((ani_id, sub_id, sub_name, bangumi_name))
+        Some((sub_name, bangumi_name))
     };
-    let (ani_id, sub_id, sub_name, bangumi_name) = parse_link()
+    let (sub_name, bangumi_name) = parse_link()
         .await
         .ok_or(CatError::Parse("can not found latest item!".to_string()))?;
     let title = format!("[{sub_name}] {bangumi_name}");
@@ -286,11 +298,14 @@ pub async fn rss_receive(
         let msg = Message::new(cmd, None);
         tx.send_msg(msg);
         magnet_links
-            .extend(get_all_episode_magnet_links(ani_id, sub_id, &old_config.filter).await?);
+            .extend(get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await?);
+        let insert_id = bangumi_id.clone();
         let insert_title = title.clone();
         let insert_url = url.to_string();
         let cmd = Box::new(|config: &mut Config| {
-            config.rss_links.insert(insert_title, insert_url);
+            config
+                .rss_links
+                .insert(insert_id, (insert_title, insert_url));
         });
         let msg = Message::new(cmd, None);
         tx.send_msg(msg);

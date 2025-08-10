@@ -79,7 +79,8 @@ async fn get_qrcode_status(client: &reqwest::Client, query: &Query) -> Result<St
         .await?
         .text()
         .await?;
-    let response = serde_json::from_str::<Response<Status>>(&response)?;
+    let response = serde_json::from_str::<Response<Status>>(&response)
+        .map_err(|_| CloudError::Api(format!("Qrcode status parse error, response: {response}")))?;
     Ok(response.data)
 }
 
@@ -97,6 +98,7 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
         time,
         sign,
     };
+    println!("get qrcode url: {qrcode}");
     BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::LoginUrl(
         qrcode.into_boxed_str(),
     ));
@@ -140,39 +142,33 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
         "[status=2] qrcode: signed in",
     ];
     loop {
-        match get_qrcode_status(&client, &query).await {
-            Ok(status) => match status.status {
-                0..=1 => {
-                    let status_str = STATUS[(status.status + 2) as usize];
-                    println!("{}", status_str);
-                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Info(status_str.into()));
-                }
-                2 => {
-                    let status_str = STATUS[(status.status + 2) as usize];
-                    println!("{}", status_str);
-                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Ok(status_str.into()));
+        let status = get_qrcode_status(&client, &query).await?.status;
+        match status {
+            0..=2 => {
+                let status_str = STATUS[(status + 2) as usize];
+                println!("{}", status_str);
+                BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::LoginState(
+                    status_str.into(),
+                ));
+                if status == 2 {
                     break;
                 }
-                -2..=-1 => {
-                    let status_str = STATUS[(status.status + 2) as usize];
-                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Error(Box::new((
-                        status_str.into(),
-                        status_str.into(),
-                    ))));
-                    Err(status_str.to_string())?
-                }
-                _ => {
-                    let status_str = format!("qrcode: aborted with {}", status.status);
-                    BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Error(Box::new((
-                        status_str.as_str().into(),
-                        status_str.as_str().into(),
-                    ))));
-                    Err(status_str)?
-                }
-            },
-            Err(error) => {
-                eprintln!("Error: {error}");
-                continue;
+            }
+            -2..=-1 => {
+                let status_str = STATUS[(status + 2) as usize];
+                BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Error(Box::new((
+                    status_str.into(),
+                    status_str.into(),
+                ))));
+                Err(status_str.to_string())?
+            }
+            _ => {
+                let status_str = format!("qrcode: aborted with {}", status);
+                BROADCAST_TX.send_msg(crate::socket_utils::ServerMsg::Error(Box::new((
+                    status_str.as_str().into(),
+                    status_str.as_str().into(),
+                ))));
+                Err(status_str)?
             }
         }
     }
