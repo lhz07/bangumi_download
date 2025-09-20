@@ -1,8 +1,6 @@
 use qrcode::{Color as QColor, QrCode};
-use ratatui::{
-    symbols::border,
-    widgets::{Block, Paragraph, Widget, Wrap},
-};
+use ratatui::symbols::border;
+use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 
 pub struct QrcodeWidget<'a> {
     url: &'a Result<Box<str>, &'a str>,
@@ -52,10 +50,8 @@ impl<'a> Widget for QrcodeWidget<'a> {
                             code[(x - quiet_zone, y + 1 - quiet_zone)] == QColor::Light
                         }
                         // if y is already the last line, don't draw its bottom line
-                        else if y == actual_size - 1 {
-                            false
-                        } else {
-                            true
+                        else {
+                            y != actual_size - 1
                         };
                         let ch = match (top, bottom) {
                             (true, true) => '█',

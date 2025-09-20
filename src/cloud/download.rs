@@ -1,16 +1,15 @@
-use std::{collections::HashMap, time::UNIX_EPOCH};
-
-use crate::{
-    config_manager::CONFIG,
-    crypto::{rsa, xor},
-    errors::CloudError,
-};
-use base64::{DecodeError, Engine, engine::general_purpose};
+use crate::config_manager::CONFIG;
+use crate::crypto::{rsa, xor};
+use crate::errors::CloudError;
+use base64::engine::general_purpose;
+use base64::{DecodeError, Engine};
 use rand::{self, Rng};
 use reqwest::header::{COOKIE, HeaderMap};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
+use std::time::UNIX_EPOCH;
 
 #[derive(Deserialize)]
 pub struct DownloadResponse {
@@ -41,7 +40,7 @@ pub fn encode(mut input: Vec<u8>, key: &[u8]) -> String {
     // Copy key and data to buffer
     buf.append(&mut input);
     // XOR encode
-    xor::xor_transform(&mut buf[16..], &xor::xor_derive_key(&key, 4));
+    xor::xor_transform(&mut buf[16..], &xor::xor_derive_key(key, 4));
     buf[16..].reverse();
     xor::xor_transform(&mut buf[16..], &xor::XOR_CLIENT_KEY);
     // Encrypt and encode
@@ -53,7 +52,7 @@ pub fn decode(input: String, key: &[u8]) -> Result<Vec<u8>, DecodeError> {
     let data = general_purpose::STANDARD.decode(input)?;
     let mut decrypt_data = rsa::rsa_decrypt(&data);
     let (key1, output) = decrypt_data.split_at_mut(16);
-    xor::xor_transform(output, &xor::xor_derive_key(&key1, 12));
+    xor::xor_transform(output, &xor::xor_derive_key(key1, 12));
     output.reverse();
     xor::xor_transform(output, &xor::xor_derive_key(key, 4));
     Ok(output.to_owned())
@@ -93,16 +92,15 @@ pub async fn get_download_link(
         .text()
         .await?;
     // println!("{}", response);
-    let result = serde_json::from_str::<DownloadResponse>(&response).map_err(|e| {
+    let result = serde_json::from_str::<DownloadResponse>(&response).inspect_err(|_| {
         eprintln!("can not get download link, response: {}", response);
-        e
     })?;
     if result.state {
         let data_str = decode(result.data, &key)?;
         let download_data = serde_json::from_slice::<DownloadData>(&data_str)?;
-        for download_info in download_data.into_values() {
+        if let Some(download_info) = download_data.into_values().next() {
             return Ok(download_info);
         }
     }
-    Err(format!("{}", result.msg).into())
+    Err(result.msg.into())
 }

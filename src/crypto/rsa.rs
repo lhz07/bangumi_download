@@ -6,7 +6,7 @@ static N: Lazy<BigUint> = Lazy::new(|| {
     BigUint::parse_bytes(b"8686980c0f5a24c4b9d43020cd2c22703ff3f450756529058b1cf88f09b8602136477198a6e2683149659bd122c33592fdb5ad47944ad1ea4d36c6b172aad6338c3bb6ac6227502d010993ac967d1aef00f0c8e038de2e4d3bc2ec368af2e9f10a6f1eda4f7262f136420c07c331b871bf139f74f3010e3c4fe57df3afb71683", 16).expect("hard encoded big int")
 });
 static E: Lazy<BigUint> = Lazy::new(|| BigUint::from_u64(0x10001).expect("hard encoded big int"));
-static KEY_LENGTH: Lazy<usize> = Lazy::new(|| ((N.bits() + 7) / 8) as usize);
+static KEY_LENGTH: Lazy<usize> = Lazy::new(|| N.bits().div_ceil(8) as usize);
 
 /// RSA 加密整个数据
 pub fn rsa_encrypt(input: &[u8]) -> Vec<u8> {
@@ -49,7 +49,7 @@ fn rsa_encrypt_slice(input: &[u8], w: &mut Vec<u8>) {
 
     // 处理前导零
     if encrypted_bytes.len() < *KEY_LENGTH {
-        w.extend(std::iter::repeat(0).take(*KEY_LENGTH - encrypted_bytes.len()));
+        w.extend(std::iter::repeat_n(0, *KEY_LENGTH - encrypted_bytes.len()));
     }
 
     w.extend(encrypted_bytes);

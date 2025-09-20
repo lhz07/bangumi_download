@@ -1,13 +1,8 @@
-use std::{
-    ops::{Add, Mul, Sub},
-    time::{Duration, Instant},
-};
-
-use ratatui::{
-    layout::{Constraint, Layout},
-    style::{Color as RColor, Stylize},
-    widgets::{Block, Clear, Paragraph, StatefulWidget, Widget, Wrap},
-};
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Color as RColor, Stylize};
+use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget, Wrap};
+use std::ops::{Add, Mul, Sub};
+use std::time::{Duration, Instant};
 
 pub struct Notification {
     title: String,
@@ -96,7 +91,7 @@ impl Mul<f64> for TColor {
 }
 
 fn color_trans(from: Color, to: Color, alpha: f64) -> Color {
-    debug_assert!(alpha <= 1.0 && alpha >= 0.0);
+    debug_assert!((0.0..=1.0).contains(&alpha));
     let trans = TColor::from(to) - from.into();
     let new = TColor::from(from) + trans * alpha;
     new.into()
@@ -114,7 +109,7 @@ impl StatefulWidget for NotificationWidget {
             Layout::vertical([Constraint::Fill(1), Constraint::Percentage(30)]).split(area)[1];
         let area = Layout::horizontal([Constraint::Fill(1), Constraint::Percentage(40)])
             .split(vertical)[1];
-        let block = Block::bordered().title(state.title.clone());
+        let block = Block::bordered().title(state.title.as_str());
         // let color = Color(20, 206, 247);
         let color = Color(255, 255, 255);
         let fg = match state.instant {
@@ -142,7 +137,7 @@ impl StatefulWidget for NotificationWidget {
         // clear the area to ensure we are on the top
         let clear = Clear;
         clear.render(area, buf);
-        let para = Paragraph::new(state.content.clone())
+        let para = Paragraph::new(state.content.as_str())
             .block(block)
             .wrap(Wrap { trim: true })
             .fg(fg);

@@ -1,4 +1,6 @@
-use crate::{BROADCAST_TX, config_manager::SafeSend, errors::CloudError};
+use crate::BROADCAST_TX;
+use crate::config_manager::SafeSend;
+use crate::errors::CloudError;
 use serde::{Deserialize, Serialize};
 
 // const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];

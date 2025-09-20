@@ -1,19 +1,17 @@
-use std::{collections::HashMap, fs::read_to_string, sync::Arc};
-
 use super::*;
-use crate::{
-    cloud::download::{encode, get_download_link},
-    cloud_manager::{download_a_folder, get_file_info, list_all_files, list_files},
-    config_manager::Config,
-    id::Id,
-    socket_utils::{
-        AsyncReadSocketMsg, AsyncWriteSocketMsg, DownloadMsg, DownloadState, SocketPath,
-    },
-    update_rss::parse_url,
+use crate::cloud::download::{encode, get_download_link};
+use crate::cloud_manager::{download_a_folder, get_file_info, list_all_files, list_files};
+use crate::config_manager::Config;
+use crate::id::Id;
+use crate::socket_utils::{
+    AsyncReadSocketMsg, AsyncWriteSocketMsg, DownloadMsg, DownloadState, SocketPath,
 };
+use crate::update_rss::parse_url;
 use config_manager::*;
 use quick_xml::de;
-use serde_json::Value;
+use std::collections::HashMap;
+use std::fs::read_to_string;
+use std::sync::Arc;
 
 // NOTICE: Global variable is shared between tests, you may use `cargo test -- --test-threads=1`
 // when the tests are failed
@@ -167,8 +165,7 @@ fn test_extract_magnet_hash() {
 #[tokio::test]
 async fn test_status_iter() {
     use crate::REFRESH_NOTIFY;
-    use crate::main_proc::ConsumeSema;
-    use crate::main_proc::StatusIter;
+    use crate::main_proc::{ConsumeSema, StatusIter};
     use std::time::Instant;
     const WAIT_TIME_LIST: [Duration; 3] = [
         Duration::from_millis(200),
@@ -180,7 +177,7 @@ async fn test_status_iter() {
     REFRESH_NOTIFY.add_permits(1);
     let timer = Instant::now();
     loop {
-        let t = *wait_time.next();
+        let t = *wait_time.next_status();
         println!("{:?}", t);
         if count == 4 {
             break;
@@ -197,8 +194,7 @@ async fn test_status_iter() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_xml() {
-    use crate::update_rss::RSS;
-    use crate::update_rss::get_response_text;
+    use crate::update_rss::{RSS, get_response_text};
     let client = ClientBuilder::new(
         reqwest::Client::builder()
             .user_agent(PC_UA)
@@ -226,48 +222,54 @@ fn test_serialize_config() {
     let _config = serde_json::from_str::<Config>(&config_str).unwrap();
 }
 
-fn general_config_modify_test(origin: Value, msg: Message) -> Config {
-    let mut config = serde_json::from_value::<Config>(origin).unwrap();
-    println!("{:#?}", config);
-    (msg.cmd)(&mut config);
-    println!("{:#?}", config);
-    config
-}
-
 #[tokio::test]
 async fn config_test() {
     use config_manager::CONFIG;
     use std::sync::Arc;
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+    let mut origin_config = Config::default();
+    let default_filters = [
+        ("611", vec!["内封"]),
+        ("583", vec!["CHT"]),
+        ("570", vec!["内封"]),
+        (
+            "default",
+            vec![
+                "简繁日内封",
+                "简日内封",
+                "简繁内封",
+                "内封",
+                "简体",
+                "简日",
+                "简繁日",
+                "简中",
+                "CHS",
+            ],
+        ),
+    ];
+    let default_filters = default_filters
+        .iter()
+        .map(|(id, filters)| (id.to_string(), SubGroup::new_const(filters)))
+        .collect::<HashMap<String, SubGroup>>();
+    origin_config.filter = default_filters;
     // initial config
-    let origin_config = serde_json::from_value::<Config>(origin).unwrap();
+    let mut expect_result = origin_config.clone();
     CONFIG.store(Arc::new(origin_config));
     // launch config write thread
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
     let config_manager = tokio::spawn(config_manager::modify_config(rx));
-    let mut map1 = HashMap::<String, Vec<String>>::new();
+    let mut map1 = HashMap::new();
     map1.insert(
         "610".to_string(),
-        vec!["简日".to_string(), "简体".to_string()],
+        SubGroup::new(vec!["简日".to_string(), "简体".to_string()]),
     );
-    map1.insert("587".to_string(), vec!["CHS".to_string()]);
+    map1.insert("587".to_string(), SubGroup::new(vec!["CHS".to_string()]));
+    expect_result.filter.extend(map1.clone());
     let cmd = Box::new(|config: &mut Config| {
         config.filter.extend(map1.into_iter());
     });
     let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "610": ["简日", "简体"], "587": ["CHS"],
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
+
+    let expect_result = serde_json::to_value(expect_result).unwrap();
     tx.send(msg).unwrap();
 
     tokio::time::sleep(Duration::from_millis(1)).await;
@@ -276,201 +278,6 @@ async fn config_test() {
     let new_config = CONFIG.load().as_ref().clone();
     let result = serde_json::to_value(new_config).unwrap();
     assert_eq!(result, expect_result);
-}
-
-#[test]
-fn replace_vec() {
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let cmd = Box::new(|config: &mut Config| {
-        *config.filter.get_mut("default").unwrap() = vec!["简日内嵌".to_string()];
-    });
-    let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简日内嵌"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let new_config = serde_json::to_value(general_config_modify_test(origin, msg)).unwrap();
-    assert_eq!(new_config, expect_result);
-    // match_type!(cookies,
-    //         String => {println!("String!")},
-    //         Vec<String> => {println!("Vec<String>!")}
-    // );
-}
-
-#[test]
-fn replace_text() {
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let cmd = Box::new(|config: &mut Config| config.cookies = "master".to_string());
-    let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "master", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let new_config = general_config_modify_test(origin, msg);
-    let result = serde_json::to_value(new_config).unwrap();
-    assert_eq!(expect_result, result);
-}
-
-#[test]
-fn append_vec_to_vec() {
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let cmd = Box::new(|config: &mut Config| {
-        config
-            .filter
-            .get_mut("611")
-            .unwrap()
-            .append(&mut vec!["简日内嵌".to_string(), "CHS".to_string()]);
-    });
-    let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封", "简日内嵌", "CHS"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let new_config = general_config_modify_test(origin, msg);
-    let result = serde_json::to_value(new_config).unwrap();
-    assert_eq!(expect_result, result);
-}
-
-#[test]
-fn append_map() {
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-
-    let mut map1 = HashMap::<String, Vec<String>>::new();
-    map1.insert(
-        "610".to_string(),
-        vec!["简日".to_string(), "简体".to_string()],
-    );
-    map1.insert("587".to_string(), vec!["CHS".to_string()]);
-    let cmd = Box::new(|config: &mut Config| {
-        config.filter.extend(map1.into_iter());
-    });
-    let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "610": ["简日", "简体"], "587": ["CHS"],
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let new_config = general_config_modify_test(origin, msg);
-    let result = serde_json::to_value(new_config).unwrap();
-    assert_eq!(expect_result, result);
-}
-
-#[test]
-fn append_text_to_vec() {
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let cmd = Box::new(|config: &mut Config| {
-        config
-            .filter
-            .get_mut("611")
-            .unwrap()
-            .push("简日内嵌".to_string());
-    });
-    let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封", "简日内嵌"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let new_config = general_config_modify_test(origin, msg);
-    let result = serde_json::to_value(new_config).unwrap();
-    assert_eq!(expect_result, result);
-}
-
-#[test]
-fn del_key() {
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], "233": ["繁体"],
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let cmd = Box::new(|config: &mut Config| {
-        config.filter.remove("233");
-    });
-    let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let new_config = general_config_modify_test(origin, msg);
-    let result = serde_json::to_value(new_config).unwrap();
-    assert_eq!(expect_result, result);
-}
-
-#[test]
-fn del_value() {
-    let origin = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"],
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简体", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let cmd = Box::new(|config: &mut Config| {
-        config
-            .filter
-            .get_mut("default")
-            .unwrap()
-            .remove_an_element(&"简体".to_string());
-    });
-    let msg = Message::new(cmd, None);
-    let expect_result = serde_json::json!(
-        {"bangumi":{}, "cookies": "", 
-        "rss_links": {}, 
-        "filter": {
-            "611": ["内封"], "583": ["CHT"], "570": ["内封"], 
-            "default": ["简繁日内封", "简日内封", "简繁内封", "简日", "简繁日", "简中", "CHS"]}, 
-        "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}});
-    let new_config = general_config_modify_test(origin, msg);
-    let result = serde_json::to_value(new_config).unwrap();
-    assert_eq!(expect_result, result);
 }
 
 // this is an example of deadlock
@@ -674,4 +481,54 @@ async fn test_bincode() {
     } else {
         panic!()
     }
+}
+
+#[test]
+fn test_for_unsafe_popup_handle() {
+    #[derive(Default)]
+    struct App {
+        current_popup: Option<Popup>,
+        rss_data: Vec<String>,
+    }
+    struct ActionConfirm {
+        action: Mem,
+    }
+    struct Mem(Box<dyn FnMut(&mut App)>);
+    impl Drop for Mem {
+        fn drop(&mut self) {
+            println!("dropping mem...");
+        }
+    }
+    impl Drop for ActionConfirm {
+        fn drop(&mut self) {
+            println!("dropping action confirm...");
+        }
+    }
+    enum Popup {
+        _Other,
+        Confirm(ActionConfirm),
+    }
+    let mut test_app = App::default();
+    let app = &mut test_app;
+    app.rss_data = vec!["rss".to_string(), "link".to_string()];
+    let rss_result = vec!["rss".to_string()];
+    app.current_popup = Some(Popup::Confirm(ActionConfirm {
+        action: Mem(Box::new(|app| {
+            app.rss_data.pop();
+        })),
+    }));
+    if app.current_popup.is_some() {
+        let popup = unsafe { app.current_popup.as_mut().unwrap_unchecked() };
+        if matches!(popup, Popup::Confirm(_)) {
+            let mut confirm = unsafe {
+                match app.current_popup.take().unwrap_unchecked() {
+                    Popup::Confirm(confirm) => confirm,
+                    _ => core::hint::unreachable_unchecked(),
+                }
+            };
+            (confirm.action.0)(app);
+        }
+    }
+    assert!(matches!(app.current_popup, None));
+    assert_eq!(app.rss_data, rss_result);
 }

@@ -1,26 +1,17 @@
-use std::{io, mem::ManuallyDrop, process::ExitCode};
-
-use bangumi_download::{
-    BROADCAST_RX, BROADCAST_TX, END_NOTIFY, ERROR_STATUS, TX,
-    config_manager::SafeSend,
-    id::Id,
-    main_proc::initialize,
-    socket_utils::{ClientMsg, ServerMsg, SocketPath, SocketState, SocketStateDetect},
-    tui::{app::App, events::LEvent},
+use bangumi_download::config_manager::SafeSend;
+use bangumi_download::id::Id;
+use bangumi_download::main_proc::initialize;
+use bangumi_download::socket_utils::{
+    ClientMsg, ServerMsg, SocketPath, SocketState, SocketStateDetect,
 };
+use bangumi_download::tui::app::App;
+use bangumi_download::tui::events::LEvent;
+use bangumi_download::{BROADCAST_RX, BROADCAST_TX, END_NOTIFY, ERROR_STATUS, TX};
 use futures::future::join3;
+use std::io;
+use std::mem::ManuallyDrop;
+use std::process::ExitCode;
 use tokio::sync::mpsc::unbounded_channel;
-
-// we need to give the macro a var or let it use the global var
-// macro_rules! printf {
-//     () => {
-//         PRINT.print(format!("\n"))
-//     };
-//     ($($arg:tt)*) => {{
-//         #[allow(static_mut_refs)]
-//         unsafe{PRINT.print(format!($($arg)*));}
-//     }};
-// }
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -90,7 +81,12 @@ async fn main() -> ExitCode {
             }
         };
 
-        let config_manager = initialize().await;
+        let config_manager = match initialize().await {
+            Ok(h) => h,
+            Err(_) => {
+                return ExitCode::FAILURE;
+            }
+        };
         let (stream_read_tx, stream_read_rx) = unbounded_channel::<(Id, ClientMsg)>();
         listener.listening(rx, stream_read_tx, stream_read_rx).await;
         drop(listener);

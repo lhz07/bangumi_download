@@ -32,3 +32,4 @@ bincode = "2.0.1"
 log = "0.4.27"
 tui-logger = "0.17.3"
 url = "2.5.4"
+chrono = { version = "0.4.42", features = ["serde"] }

@@ -1,10 +1,12 @@
-use crate::cloud_manager::get_cloud_cookies;
+use crate::time_stamp::TimeStamp;
 use arc_swap::ArcSwap;
+use bincode::{Decode, Encode};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
-use std::{collections::HashMap, error::Error};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Notify, mpsc};
 
@@ -13,12 +15,12 @@ pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| ArcSwap::new(Arc::new(Co
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Config {
     /// - `key`: bangumi ID
-    /// - `value`: last update time stamp
-    pub bangumi: HashMap<String, String>,
+    /// - `value`: Bangumi
+    pub bangumi: HashMap<String, Bangumi>,
     pub cookies: String,
     /// - `key`: subgroup ID
-    /// - `value`: `Vec<Keyword>`
-    pub filter: HashMap<String, Vec<String>>,
+    /// - `value`: SubGroup
+    pub filter: HashMap<String, SubGroup>,
     /// - `key`: task hash
     /// - `value`: anime name
     pub hash_ani: HashMap<String, String>,
@@ -31,6 +33,38 @@ pub struct Config {
     /// - `key`: bangumi ID
     /// - `value`: (bangumi name, rss link)
     pub rss_links: HashMap<String, (String, String)>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Encode, Decode)]
+pub struct SubGroup {
+    pub name: String,
+    pub filter_list: Vec<String>,
+}
+
+impl SubGroup {
+    pub fn new_const(filter_list: &[&str]) -> Self {
+        Self {
+            name: String::new(),
+            filter_list: filter_list.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+    pub fn new(filter_list: Vec<String>) -> Self {
+        Self {
+            name: String::new(),
+            filter_list,
+        }
+    }
+
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = name;
+        self
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Bangumi {
+    pub last_update: TimeStamp,
+    pub latest_episode: String,
 }
 
 pub trait Remove<T> {
@@ -51,7 +85,7 @@ pub trait SafeSend<T> {
 
 impl SafeSend<Message> for UnboundedSender<Message> {
     fn send_msg(&self, msg: Message) {
-        if let Err(_) = self.send(msg) {
+        if self.send(msg).is_err() {
             eprintln!("receiver is guaranteed to be dropped after all senders");
         }
     }
@@ -59,13 +93,13 @@ impl SafeSend<Message> for UnboundedSender<Message> {
 
 // #[derive(Debug)]
 pub struct Message {
-    pub cmd: Box<dyn FnOnce(&mut Config) -> () + Send + Sync>,
+    pub cmd: Box<dyn FnOnce(&mut Config) + Send + Sync>,
     pub notify: Option<Arc<Notify>>,
 }
 
 impl Message {
     pub fn new(
-        cmd: Box<dyn FnOnce(&mut Config) -> () + Send + Sync>,
+        cmd: Box<dyn FnOnce(&mut Config) + Send + Sync>,
         notify: Option<Arc<Notify>>,
     ) -> Self {
         Self { cmd, notify }
@@ -74,8 +108,7 @@ impl Message {
 
 impl Config {
     fn new() -> Self {
-        let data = Config::default();
-        data
+        Config::default()
     }
 
     pub async fn initial_config() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -85,20 +118,44 @@ impl Config {
             old_json = std::fs::read_to_string(path).expect("can not read config.json");
         }
         let data = if path.exists() && !old_json.is_empty() {
-            serde_json::from_str::<Config>(&old_json).or_else(|error| {
-                Err(format!(
-                    "Invalid json format, you may try empty or delete config.json\nError: {error}"
-                ))
+            serde_json::from_str::<Config>(&old_json).map_err(|error| {
+                format!(
+                    "Invalid json format, you may try to empty or delete config.json\nError: {error}"
+                )
             })?
         } else {
             // get cookies
-            let cookies = get_cloud_cookies().await?;
-            let default_config = serde_json::json!({"bangumi":{}, "cookies": cookies, "rss_links": {}, "filter": {"611": ["内封"], "583": ["CHT"], "570": ["内封"], "default": ["简繁日内封", "简日内封", "简繁内封", "内封", "简体", "简日", "简繁日", "简中", "CHS"]}, "magnets":{}, "hash_ani": {}, "hash_ani_slow": {}, "temp": {}, "files_to_download": {}});
+            // let cookies = get_cloud_cookies().await?;
+            let mut default_config = Config::default();
+            let default_filters = [
+                ("611", vec!["内封"]),
+                ("583", vec!["CHT"]),
+                ("570", vec!["内封"]),
+                (
+                    "default",
+                    vec![
+                        "简繁日内封",
+                        "简日内封",
+                        "简繁内封",
+                        "内封",
+                        "简体",
+                        "简日",
+                        "简繁日",
+                        "简中",
+                        "CHS",
+                    ],
+                ),
+            ];
+            let default_filters = default_filters
+                .iter()
+                .map(|(id, filters)| (id.to_string(), SubGroup::new_const(filters)))
+                .collect::<HashMap<String, SubGroup>>();
+            default_config.filter = default_filters;
             let default_json = serde_json::to_string_pretty(&default_config)
                 .expect("default config should be valid!");
             std::fs::write(path, default_json)
-                .or_else(|error| Err(format!("Can not write to path!\nError: {error}")))?;
-            serde_json::from_value(default_config).expect("default config should be valid!")
+                .map_err(|error| format!("Can not write to path!\nError: {error}"))?;
+            default_config
         };
         CONFIG.store(Arc::new(data));
         Ok(())

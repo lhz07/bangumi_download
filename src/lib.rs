@@ -2,11 +2,14 @@ pub mod cloud;
 pub mod cloud_manager;
 pub mod config_manager;
 pub mod crypto;
+pub mod drop_guard;
 pub mod errors;
 pub mod id;
 pub mod login_with_qrcode;
 pub mod main_proc;
+pub mod recovery_signal;
 pub mod socket_utils;
+pub mod time_stamp;
 pub mod tui;
 pub mod update_rss;
 
@@ -14,22 +17,24 @@ pub mod update_rss;
 pub mod tests;
 
 use arc_swap::ArcSwapOption;
+use chrono::FixedOffset;
 use cloud_manager::MOBILE_UA;
 use config_manager::Message;
 use once_cell::sync::Lazy;
 use reqwest::Proxy;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
-use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
-use std::{mem::ManuallyDrop, sync::atomic::AtomicBool, time::Duration};
-use tokio::{
-    sync::{
-        Mutex, Notify, Semaphore,
-        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    },
-    task::JoinHandle,
-};
+use reqwest_retry::RetryTransientMiddleware;
+use reqwest_retry::policies::ExponentialBackoff;
+use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::time::Duration;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::task::JoinHandle;
 
-use crate::{errors::CatError, socket_utils::ServerMsg};
+use crate::errors::CatError;
+use crate::recovery_signal::RecoverySignal;
+use crate::socket_utils::ServerMsg;
 pub const PC_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -90,7 +95,6 @@ pub static CLIENT_PROXY: Lazy<ClientWithMiddleware> = Lazy::new(|| {
 });
 pub static TX: Lazy<ArcSwapOption<UnboundedSender<Message>>> =
     Lazy::new(|| ArcSwapOption::new(None));
-// I suppose the capacity is the count of messages
 pub static BROADCAST_TX: Lazy<UnboundedSender<ServerMsg>> = Lazy::new(|| {
     let (tx, rx) = unbounded_channel::<ServerMsg>();
     let rx = Box::new(ManuallyDrop::new(rx));
@@ -98,11 +102,15 @@ pub static BROADCAST_TX: Lazy<UnboundedSender<ServerMsg>> = Lazy::new(|| {
     tx
 });
 pub static mut BROADCAST_RX: *mut ManuallyDrop<UnboundedReceiver<ServerMsg>> = std::ptr::null_mut();
-pub static ERROR_STATUS: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
-pub static REFRESH_DOWNLOAD: Lazy<Mutex<Option<JoinHandle<Result<(), CatError>>>>> =
-    Lazy::new(|| Mutex::new(None));
-pub static REFRESH_DOWNLOAD_SLOW: Lazy<Mutex<Option<JoinHandle<Result<(), CatError>>>>> =
-    Lazy::new(|| Mutex::new(None));
+pub static ERROR_STATUS: AtomicBool = AtomicBool::new(false);
+type DownloadHandle = Mutex<Option<JoinHandle<Result<(), CatError>>>>;
+pub static REFRESH_DOWNLOAD: Lazy<DownloadHandle> = Lazy::new(|| Mutex::new(None));
+pub static REFRESH_DOWNLOAD_SLOW: Lazy<DownloadHandle> = Lazy::new(|| Mutex::new(None));
 pub static REFRESH_NOTIFY: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(0));
-pub static END_NOTIFY: Lazy<Notify> = Lazy::new(|| Notify::new());
-pub static READY_TO_EXIT: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+pub static END_NOTIFY: Lazy<Notify> = Lazy::new(Notify::new);
+pub static READY_TO_EXIT: AtomicBool = AtomicBool::new(false);
+pub static UTC_8: FixedOffset = FixedOffset::east_opt(8 * 3600).unwrap();
+pub static RSS_DATA_PERMIT: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
+pub static LOGIN_STATUS: AtomicBool = AtomicBool::new(false);
+pub static RECOVERY_SIGNAL: Lazy<RecoverySignal> = Lazy::new(|| RecoverySignal::new(3));
+pub static CLIENT_COUNT: AtomicUsize = AtomicUsize::new(0);

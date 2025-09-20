@@ -1,33 +1,36 @@
+use crate::cloud_manager::{download_a_folder, get_cloud_cookies};
+use crate::config_manager::{Bangumi, CONFIG, Config, Message, SafeSend, SubGroup};
+use crate::errors::{CatError, SocketError};
+use crate::id::Id;
+use crate::main_proc::{
+    read_socket, restart_refresh_download, restart_refresh_download_slow, write_socket,
+};
+use crate::time_stamp::TimeStamp;
+use crate::tui::progress_bar::{
+    BasicBar, Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar,
+};
+use crate::update_rss::{check_rss_link, rss_receive, start_rss_receive};
+use crate::{
+    BROADCAST_TX, CLIENT_COUNT, CLIENT_WITH_RETRY, END_NOTIFY, LOGIN_STATUS, RECOVERY_SIGNAL,
+    RSS_DATA_PERMIT, TX,
+};
 use bincode::{Decode, Encode};
 use std::collections::HashMap;
+use std::env::temp_dir;
+use std::fs;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env::temp_dir, fs, path::PathBuf};
-use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::SocketAddr;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tokio::{
-    io::{self, AsyncReadExt},
-    net::UnixListener,
-};
-
-use crate::cloud_manager::{download_a_folder, get_cloud_cookies};
-use crate::config_manager::{CONFIG, Config, Message, SafeSend};
-use crate::errors::SocketError;
-use crate::id::Id;
-use crate::main_proc::{read_socket, write_socket};
-use crate::tui::progress_bar::{
-    BasicBar, Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar,
-};
-use crate::{BROADCAST_TX, END_NOTIFY, TX};
 
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
@@ -90,8 +93,8 @@ impl SocketPath {
                     self.to_listener()?
                 }
                 SocketState::Other(e) => Err(e)?,
-                SocketState::Working => Err(format!("The socket is already working!"))?,
-                SocketState::NotFound => Err(format!("Can not find the socket!??"))?,
+                SocketState::Working => Err("The socket is already working!".to_string())?,
+                SocketState::NotFound => Err("Can not find the socket!??".to_string())?,
             },
             Err(e) => Err(e)?,
         };
@@ -112,6 +115,7 @@ impl SocketStateDetect for SocketPath {
 #[derive(PartialEq, Eq, Hash)]
 pub enum HandleType {
     Login,
+    RefreshRSS,
 }
 
 // SocketListener ------------------------------------------------
@@ -121,7 +125,7 @@ pub struct SocketListener {
     stream_write_txs: HashMap<Id, UnboundedSender<ServerMsg>>,
     path: PathBuf,
     state: ProgressSuit<ProgressBar>,
-    handles: HashMap<HandleType, JoinHandle<()>>,
+    handles: HashMap<HandleType, (Id, JoinHandle<()>)>,
 }
 
 impl SocketListener {
@@ -148,16 +152,36 @@ impl SocketListener {
                 let (read, write) = stream.into_split();
                 let id = Id::generate();
                 let (write_tx, write_rx) = unbounded_channel::<ServerMsg>();
-                tokio::spawn(read_socket(id, self.stream_read_tx.clone(), read));
-                tokio::spawn(write_socket(write_rx, write));
+                let stream_read_tx = self.stream_read_tx.clone();
+                let write_tx_1 = write_tx.clone();
+                let count = CLIENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                println!("current client count: {}", count + 1);
+                tokio::spawn(async move {
+                    let _ = read_socket(id, stream_read_tx, read).await;
+                    // send a msg to help `write_socket` to close
+                    write_tx_1.send_msg(ServerMsg::Exit);
+                    println!("read socket task is exited");
+                    // we always increase the count before decreasing it
+                    debug_assert!(CLIENT_COUNT.load(std::sync::atomic::Ordering::Relaxed) > 0);
+                    let count = CLIENT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    println!("current client count: {}", count - 1);
+                });
+                tokio::spawn(async move {
+                    let _ = write_socket(write_rx, write).await;
+                    println!("write socket task is exited");
+                });
                 self.stream_write_txs.insert(id, write_tx);
             }
-            Err(err) => eprintln!("Error: {}", err),
+            Err(err) => eprintln!("accept stream error: {}", err),
         }
     }
 
     /// broadcast server message to every stream
     fn broadcast(&mut self, msg: ServerMsg) {
+        if self.stream_write_txs.is_empty() {
+            // explicitly return to avoid collect
+            return;
+        }
         let mut error_key = Vec::new();
         if let [other @ .., (last_key, last_tx)] =
             self.stream_write_txs.iter().collect::<Vec<_>>().as_slice()
@@ -189,12 +213,14 @@ impl SocketListener {
         deadline: &mut OneShotSleep,
     ) {
         // change the state here
-        // if the msg is instant msg, forward it, and return.
-        // a instant msg means that the state is in sync, there is no need
-        // to send the state again
+        // if the msg is instant msg, forward it, and if `unhandle_latest` is false, return.
+        // if we received an instant msg, and `unhandle_latest` is false, that means the state is in sync,
+        // there is no need to send the state again
         if let Some(msg) = self.receive_broadcast(first_msg).await {
             self.broadcast(msg);
-            return;
+            if !*unhandle_latest {
+                return;
+            }
         }
         if !self.state.is_empty() && last_send.elapsed() >= *interval {
             // send state here
@@ -202,7 +228,7 @@ impl SocketListener {
             self.broadcast(ServerMsg::DownloadSync(state.into_boxed_slice()));
             *last_send = Instant::now();
             // reset deadline
-            deadline.set_duration(*timeout);
+            deadline.set_instant(*last_send + *timeout);
             *unhandle_latest = false;
         } else {
             *unhandle_latest = true;
@@ -242,13 +268,20 @@ impl SocketListener {
                         None
                     }
                 }
+                DownloadState::Failed => {
+                    if self.state.remove(download_msg.id).is_some() {
+                        Some(msg)
+                    } else {
+                        None
+                    }
+                }
             },
             _ => Some(msg),
         }
     }
     /// read the socket msg and handle them
     async fn handle_stream_msg(&mut self, stream_msg: (Id, ClientMsg)) {
-        let (id, msg) = stream_msg;
+        let (msg_id, msg) = stream_msg;
         // state sync message should be send to the exact stream, but other messages
         // should be broadcasted to all streams
 
@@ -257,21 +290,24 @@ impl SocketListener {
         match msg {
             ClientMsg::SyncQuery => {
                 println!("accept sync query!");
-                if let Some(tx) = self.stream_write_txs.get(&id) {
+                if let Some(tx) = self.stream_write_txs.get(&msg_id) {
                     let progresses = self.state.clone().to_simple_bars();
                     let config = CONFIG.load();
                     let last_updates = &config.bangumi;
                     let animes = config
                         .rss_links
                         .iter()
-                        .map(|(id, (name, _))| {
-                            let last_update = match last_updates.get(id) {
+                        .map(|(id, (name, rss_link))| {
+                            let latest = match last_updates.get(id) {
                                 Some(str) => str.clone(),
-                                None => String::new(),
+                                None => Bangumi::default(),
                             };
                             Anime {
+                                id: id.clone(),
                                 name: name.clone(),
-                                last_update,
+                                rss_link: rss_link.clone(),
+                                last_update: latest.last_update,
+                                latest_episode: latest.latest_episode,
                             }
                         })
                         .collect::<Vec<_>>();
@@ -279,9 +315,11 @@ impl SocketListener {
                         progresses,
                         animes,
                     })));
+                    tx.send_msg(ServerMsg::IsLogin(
+                        LOGIN_STATUS.load(std::sync::atomic::Ordering::Relaxed),
+                    ));
                 } else {
                     eprintln!("stream write tx is closed");
-                    return;
                 };
             }
             ClientMsg::DownloadFolder(cid) => {
@@ -291,10 +329,7 @@ impl SocketListener {
                         let info = format!(
                             "Can not download the folder: {cid}, please check the cid and login status"
                         );
-                        BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((
-                            info.into_boxed_str(),
-                            e.to_string().into_boxed_str(),
-                        ))));
+                        BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((info, e.to_string()))));
                     } else {
                         println!("successfully downloaded a folder");
                         let info = format!("Successfully downloaded the folder: {cid}");
@@ -306,70 +341,194 @@ impl SocketListener {
                 if self
                     .handles
                     .get(&HandleType::Login)
-                    .is_some_and(|h| !h.is_finished())
+                    .is_some_and(|(id, h)| *id == msg_id && !h.is_finished())
                 {
                     eprintln!("Login handle is already running, ignoring the request");
                 } else {
                     let handle = tokio::spawn(async {
                         match get_cloud_cookies().await {
-                            Ok(cookies) => {
-                                let cmd = Box::new(|config: &mut Config| {
-                                    config.cookies = cookies;
-                                });
-                                let notify = Arc::new(Notify::new());
-                                let msg = Message::new(cmd, Some(notify.clone()));
-                                TX.load().as_ref().unwrap().send_msg(msg);
-                                notify.notified().await;
-                                BROADCAST_TX
-                                    .send_msg(ServerMsg::Ok("Successfully logged in".into()));
-                            }
+                            Ok(cookies) => match TX.load().as_ref() {
+                                Some(tx) => {
+                                    let cmd = Box::new(|config: &mut Config| {
+                                        config.cookies = cookies;
+                                    });
+                                    let notify = Arc::new(Notify::new());
+                                    let msg = Message::new(cmd, Some(notify.clone()));
+                                    tx.send_msg(msg);
+                                    notify.notified().await;
+                                    BROADCAST_TX
+                                        .send_msg(ServerMsg::Ok("Successfully logged in".into()));
+                                    RECOVERY_SIGNAL.recover();
+                                    BROADCAST_TX.send_msg(ServerMsg::IsLogin(true));
+                                }
+                                None => {
+                                    eprintln!("Can not store cookies, error: {}", CatError::Exit);
+                                }
+                            },
                             Err(e) => {
                                 eprintln!("get cloud cookies error: {e}");
                                 BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((
                                     "Failed to get cloud cookies".into(),
-                                    e.to_string().into_boxed_str(),
+                                    e.to_string(),
                                 ))));
                                 BROADCAST_TX.send_msg(ServerMsg::QrcodeExpired);
                             }
                         }
                     });
-                    self.handles.insert(HandleType::Login, handle);
+                    if let Some(h) = self.handles.insert(HandleType::Login, (msg_id, handle))
+                        && !h.1.is_finished()
+                    {
+                        eprintln!(
+                            "a login process of another client is already running, aborting it"
+                        );
+                        h.1.abort();
+                    }
                 }
             }
-            // no need to handle these messages
+            ClientMsg::DeleteAnime(id) => match TX.load().as_ref() {
+                Some(tx) => {
+                    let permit = RSS_DATA_PERMIT.acquire().await.unwrap();
+                    let cmd = Box::new(move |config: &mut Config| {
+                        config.bangumi.remove(&*id);
+                        config.rss_links.remove(&*id);
+                    });
+                    let notify = Arc::new(Notify::new());
+                    let msg = Message::new(cmd, Some(notify.clone()));
+                    tx.send_msg(msg);
+                    notify.notified().await;
+                    drop(permit);
+                }
+                None => {
+                    eprintln!("Can not delete anime, error: {}", CatError::Exit);
+                }
+            },
+            ClientMsg::AddRSS(rss_link) => {
+                println!("add rss: {}", rss_link);
+                let client = CLIENT_WITH_RETRY.clone();
+                match check_rss_link(&rss_link, &client).await {
+                    Ok(()) => {
+                        let rss_update = async || -> Result<(), CatError> {
+                            let temp_tx = TX.load();
+                            let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
+                            let old_config = CONFIG.load_full();
+                            rss_receive(tx, &rss_link, &old_config, &CLIENT_WITH_RETRY).await?;
+                            restart_refresh_download().await?;
+                            restart_refresh_download_slow().await?;
+                            Ok(())
+                        };
+                        if let Err(e) = rss_update().await {
+                            eprintln!("add RSS link error: {e}");
+                            BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((
+                                "Can not add RSS link".to_string(),
+                                e.to_string(),
+                            ))));
+                        }
+                    }
+                    Err(e) => {
+                        let error = format!("RSS link error: {e}");
+                        eprintln!("{}", error);
+                        BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((error.clone(), error))));
+                    }
+                }
+            }
+            ClientMsg::RefreshRSS => {
+                if self
+                    .handles
+                    .get(&HandleType::RefreshRSS)
+                    .is_some_and(|(id, h)| *id == msg_id && !h.is_finished())
+                {
+                    eprintln!("RSS refresh handle is already running, ignoring the request");
+                } else {
+                    let refresh = async || -> Result<(), CatError> {
+                        println!("\nChecking updates...\n");
+                        start_rss_receive().await?;
+                        println!("\nCheck finished!\n");
+                        Ok(())
+                    };
+                    let handle = tokio::spawn(async move {
+                        match refresh().await {
+                            Ok(()) => {
+                                println!("successfully refreshed rss");
+                                let config = CONFIG.load();
+                                let last_updates = &config.bangumi;
+                                let animes = config
+                                    .rss_links
+                                    .iter()
+                                    .map(|(id, (name, rss_link))| {
+                                        let latest = match last_updates.get(id) {
+                                            Some(str) => str.clone(),
+                                            None => Bangumi::default(),
+                                        };
+                                        Anime {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            rss_link: rss_link.clone(),
+                                            last_update: latest.last_update,
+                                            latest_episode: latest.latest_episode,
+                                        }
+                                    })
+                                    .collect::<Box<_>>();
+                                BROADCAST_TX.send_msg(ServerMsg::RSSData(animes));
+                            }
+                            Err(e) => {
+                                eprintln!("refresh rss error: {e}");
+                                BROADCAST_TX.send_msg(ServerMsg::Error(Box::new((
+                                    "Can not refresh RSS".to_string(),
+                                    e.to_string(),
+                                ))));
+                            }
+                        }
+                    });
+                    if let Some(h) = self
+                        .handles
+                        .insert(HandleType::RefreshRSS, (msg_id, handle))
+                        && !h.1.is_finished()
+                    {
+                        eprintln!(
+                            "a RSS refresh process requested by another client is already running, aborting it"
+                        );
+                        h.1.abort();
+                    }
+                }
+            }
+            ClientMsg::GetFilters => {
+                let config_guard = CONFIG.load();
+                let filters = config_guard
+                    .filter
+                    .clone()
+                    .into_iter()
+                    .map(|(id, subgroup)| Filter { id, subgroup })
+                    .collect();
+                BROADCAST_TX.send_msg(ServerMsg::SubFilter(filters));
+            }
+            ClientMsg::InsertFilter(filter) => match TX.load().as_ref() {
+                Some(tx) => {
+                    let cmd = Box::new(|config: &mut Config| {
+                        config.filter.insert(filter.id, filter.subgroup);
+                    });
+                    let msg = Message::new(cmd, None);
+                    tx.send_msg(msg);
+                }
+                None => {
+                    eprintln!("Can not modify filter rule, error: {}", CatError::Exit);
+                }
+            },
+            ClientMsg::DelFilter(id) => match TX.load().as_ref() {
+                Some(tx) => {
+                    let cmd = Box::new(move |config: &mut Config| {
+                        config.filter.remove(&id);
+                    });
+                    let msg = Message::new(cmd, None);
+                    tx.send_msg(msg);
+                }
+                None => {
+                    eprintln!("Can not modify filter rule, error: {}", CatError::Exit);
+                }
+            },
             ClientMsg::Exit => {
                 println!("Received client exit message");
-                self.stream_write_txs.remove(&id);
-            } // async fn handle_msg(msg: SocketMsg, tx: &UnboundedSender<SocketMsg>) {
-              // ADD_LINK => {
-              // let rss_link = stream.read_str().await?;
-              // let client = CLIENT_WITH_RETRY.clone();
-              // match check_rss_link(&rss_link, client).await {
-              //     Ok(()) => {
-              // let temp_tx = TX.load();
-              // let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
-              // let old_config = CONFIG.load_full();
-              // let rss_update = async || -> Result<(), CatError> {
-              //     rss_receive(tx, &rss_link, &old_config, CLIENT_WITH_RETRY.clone())
-              // .await?;
-              //     restart_refresh_download().await?;
-              //     restart_refresh_download_slow().await?;
-              //     Ok(())
-              // };
-              // if let Err(e) = rss_update().await {
-              //     eprintln!("add link error: {e}");
-              // }
-              //     }
-              //     Err(error) => stream.write_str(&error).await?,
-              // }
-              //     }
-              //     DOWNLOAD_FOLDER => {
-              // let cid = stream.read_str().await?;
-              // if let Err(e) = download_a_folder(&cid, None).await {
-              //     stream.write_str(&e.to_string()).await?;
-              // }
-              //     }
-              // }
+                self.stream_write_txs.remove(&msg_id);
+            }
         }
     }
 
@@ -384,7 +543,7 @@ impl SocketListener {
         let mut last_send = Instant::now();
 
         let mut unhandle_latest = false;
-        // internal: time internal between sending messages
+        // interval: time interval between sending messages
         let interval = Duration::from_millis(70);
         let timeout = Duration::from_millis(100);
         let mut deadline = OneShotSleep::new();
@@ -438,10 +597,10 @@ impl Drop for SocketListener {
         // we should drop the listener first, then the socket may be discarded
         unsafe { ManuallyDrop::drop(&mut self.listener) };
         let state = self.try_connect();
-        if let SocketState::Discarded = state {
-            if let Err(e) = fs::remove_file(&self.path) {
-                eprintln!("Can not remove the unix socket file, error: {}", e);
-            }
+        if let SocketState::Discarded = state
+            && let Err(e) = fs::remove_file(&self.path)
+        {
+            eprintln!("Can not remove the unix socket file, error: {}", e);
         }
     }
 }
@@ -517,63 +676,40 @@ impl<T: Decode<()> + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + s
     }
 }
 
-// pub struct OneShotSleep1 {
-//     notify: Notify,
-//     duration: Mutex<Option<Duration>>,
-// }
-
-// impl OneShotSleep1 {
-//     pub fn new() -> Self {
-//         let notify = Notify::new();
-//         let duration = Mutex::new(None);
-//         Self { notify, duration }
-//     }
-
-//     /// set sleep duration
-//     pub fn set_duration(&self, dur: Duration) {
-//         let mut guard = self.duration.lock().unwrap();
-//         *guard = Some(dur);
-//         drop(guard);
-//         self.notify.notify_waiters();
-//     }
-
-//     /// wait for a wake
-//     pub async fn wait(&self) {
-//         let mut guard = self.duration.lock().unwrap();
-//         if let Some(dur) = guard.take() {
-//             drop(guard);
-//             tokio::time::sleep(dur).await;
-//             return;
-//         }
-//         drop(guard);
-//         // wait for new sleep duration
-//         self.notify.notified().await;
-//     }
-// }
-
 pub struct OneShotSleep {
-    duration: Option<Duration>,
+    instant: Option<Instant>,
+}
+
+impl Default for OneShotSleep {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OneShotSleep {
     pub fn new() -> Self {
-        let duration = None;
-        OneShotSleep { duration }
+        let instant = None;
+        OneShotSleep { instant }
     }
 
     /// set sleep duration
-    pub fn set_duration(&mut self, dur: Duration) {
-        self.duration = Some(dur);
+    pub fn set_instant(&mut self, instant: Instant) {
+        self.instant = Some(instant);
     }
 
     /// wait forever or sleep for a duration
     pub async fn wait(&mut self) {
-        if let Some(dur) = self.duration.take() {
-            tokio::time::sleep(dur).await;
-            return;
+        match self.instant {
+            Some(ins) => {
+                // this sleep may be interrupted
+                tokio::time::sleep_until(ins).await;
+                self.instant = None;
+            }
+            None => {
+                // wait forever
+                futures::future::pending::<()>().await;
+            }
         }
-        // wait forever
-        futures::future::pending::<()>().await;
     }
 }
 
@@ -582,11 +718,15 @@ pub enum ServerMsg {
     Download(DownloadMsg),
     LoginUrl(Box<str>),
     LoginState(Box<str>),
+    IsLogin(bool),
     QrcodeExpired,
     Ok(Box<str>),
     Info(Box<str>),
+    RSSData(Box<[Anime]>),
+    Loading,
+    SubFilter(Box<[Filter]>),
     /// - (error_info, error)
-    Error(Box<(Box<str>, Box<str>)>),
+    Error(Box<(String, String)>),
     DownloadSync(Box<[ProgressState]>),
     SyncResp(Box<SyncInfo>),
     Exit,
@@ -597,6 +737,15 @@ pub enum ClientMsg {
     /// - cid
     DownloadFolder(Box<str>),
     LoginReq,
+    GetFilters,
+    InsertFilter(Filter),
+    /// - id
+    DelFilter(String),
+    /// - bangumi id
+    DeleteAnime(Box<str>),
+    /// - RSS link
+    AddRSS(Box<str>),
+    RefreshRSS,
     SyncQuery,
     Exit,
 }
@@ -610,18 +759,28 @@ pub struct DownloadMsg {
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct Anime {
+    pub id: String,
     pub name: String,
-    pub last_update: String,
+    pub last_update: TimeStamp,
+    pub latest_episode: String,
+    pub rss_link: String,
+}
+
+#[derive(Encode, Decode, Debug, Default, Clone)]
+pub struct Filter {
+    pub id: String,
+    pub subgroup: SubGroup,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
 pub enum DownloadState {
     /// - `String`: file name
     /// - `u64`: file size
-    Start(Box<(Box<str>, u64)>),
+    Start(Box<(String, u64)>),
     /// - increment size
     Downloading(u64),
     Finished,
+    Failed,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]

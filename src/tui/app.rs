@@ -1,28 +1,24 @@
-use std::{collections::VecDeque, io, time::Duration};
-
-use crate::{
-    END_NOTIFY, READY_TO_EXIT,
-    config_manager::SafeSend,
-    socket_utils::{AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, SocketPath},
-    tui::{
-        events::LEvent,
-        notification_widget::Notification,
-        progress_bar::{ProgressSuit, SimpleBar},
-        ui::{CurrentScreen, InputState, Popup},
-    },
+use crate::config_manager::SafeSend;
+use crate::socket_utils::{
+    Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, Filter, SocketPath,
 };
+use crate::tui::events::LEvent;
+use crate::tui::loading_widget::LoadingState;
+use crate::tui::notification_widget::Notification;
+use crate::tui::progress_bar::{ProgressSuit, SimpleBar};
+use crate::tui::ui::{CurrentScreen, InputState, Popup};
+use crate::{END_NOTIFY, READY_TO_EXIT};
 use futures::future::join;
-use ratatui::{
-    DefaultTerminal,
-    crossterm::event::{self},
-    widgets::ScrollbarState,
-};
-use tokio::{
-    net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    select,
-    sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    task::JoinHandle,
-};
+use ratatui::DefaultTerminal;
+use ratatui::crossterm::event::{self};
+use ratatui::widgets::{ListState as TuiListState, ScrollbarState};
+use std::collections::VecDeque;
+use std::io;
+use std::time::Duration;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::select;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
 use tui_logger::TuiWidgetState;
 
 impl SafeSend<ClientMsg> for UnboundedSender<ClientMsg> {
@@ -57,6 +53,12 @@ impl ListState {
     }
 }
 
+impl Default for ListState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Handles {
     pub socket_handle: JoinHandle<Result<(), io::Error>>,
     pub ui_events_handle: JoinHandle<Result<(), io::Error>>,
@@ -73,6 +75,13 @@ pub struct App {
     pub(crate) log_widget_state: TuiWidgetState,
     pub(crate) socket_tx: UnboundedSender<ClientMsg>,
     pub(crate) notifications_queue: VecDeque<Notification>,
+    pub(crate) rss_data: Vec<Anime>,
+    pub(crate) rss_state: TuiListState,
+    pub(crate) filter_id_state: TuiListState,
+    pub(crate) filter_rule_state: TuiListState,
+    pub(crate) loading_state: Option<LoadingState>,
+    pub(crate) is_logged_in: bool,
+    pub(crate) filters: Vec<Filter>,
 }
 
 impl App {
@@ -113,6 +122,13 @@ impl App {
             socket_tx,
             log_widget_state,
             notifications_queue: VecDeque::new(),
+            rss_data: Vec::new(),
+            rss_state: TuiListState::default(),
+            filter_id_state: TuiListState::default(),
+            filter_rule_state: TuiListState::default(),
+            loading_state: None,
+            is_logged_in: false,
+            filters: Vec::new(),
         };
         app.socket_tx.send_msg(ClientMsg::SyncQuery);
         (app, event_rx, handles)

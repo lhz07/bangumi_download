@@ -1,7 +1,7 @@
-use std::{fmt, sync::atomic::AtomicU64};
-
 use bincode::{Decode, Encode};
 use once_cell::sync::Lazy;
+use std::fmt;
+use std::sync::atomic::AtomicU64;
 
 static ORIGIN: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 

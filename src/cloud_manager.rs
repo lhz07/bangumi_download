@@ -1,34 +1,34 @@
+use crate::cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link};
+use crate::config_manager::{CONFIG, SafeSend};
+use crate::drop_guard::DropGuard;
+use crate::errors::{CatError, CloudError, DownloadError};
+use crate::id::Id;
+use crate::login_with_qrcode::login_with_qrcode;
+use crate::socket_utils::{DownloadMsg, DownloadState, ServerMsg};
 use crate::{
-    BROADCAST_TX, CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, TX,
-    cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link},
-    config_manager::{CONFIG, Config, Message, SafeSend},
-    errors::{CatError, CloudError, DownloadError},
-    id::Id,
-    login_with_qrcode::login_with_qrcode,
-    socket_utils::{DownloadMsg, DownloadState, ServerMsg},
+    BROADCAST_TX, CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, LOGIN_STATUS,
 };
 use futures::future::join_all;
 use regex::Regex;
-use reqwest::{
-    Client,
-    header::{CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue},
+use reqwest::Client;
+use reqwest::header::{
+    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue,
 };
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    os::unix::fs::FileExt,
-    path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
-    time::Duration,
-};
-use std::{fs as sfs, str::FromStr};
-use tokio::{
-    fs,
-    sync::{Notify, Semaphore},
-};
-use tokio_retry::{Retry, strategy::FixedInterval};
+use std::collections::HashMap;
+use std::fs as sfs;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+use tokio::fs;
+use tokio::sync::Semaphore;
+use tokio_retry::Retry;
+use tokio_retry::strategy::FixedInterval;
 
 pub const MOBILE_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.50(0x1800323d) NetType/WIFI Language/zh_CN";
 
@@ -414,7 +414,7 @@ pub async fn list_files(
         .await?
         .text()
         .await?;
-    let result = serde_json::from_str::<FileListResponse>(&response).or_else(|e| {
+    let result = serde_json::from_str::<FileListResponse>(&response).map_err(|e| {
         let mut errors = format!("list_files: can not serialize list file response, error: {e}\n");
         match serde_json::from_str::<Errors>(&response) {
             Ok(error) => {
@@ -425,7 +425,7 @@ pub async fn list_files(
             }
             Err(e) => errors.push_str(&format!("list_files: can not get errors, error: {}", e)),
         }
-        Err(errors)
+        errors
     })?;
 
     Ok(result)
@@ -435,12 +435,12 @@ pub async fn list_all_files(
     client: &ClientWithMiddleware,
     folder_id: &str,
 ) -> Result<Vec<FileInfo>, CloudError> {
-    let response = list_files(client, &folder_id, 0, 20).await?;
+    let response = list_files(client, folder_id, 0, 20).await?;
     let file_count = response.count;
     let mut current = response.files.len() as i32;
     let mut files = response.files;
     while current < file_count {
-        let mut response = list_files(client, &folder_id, current, file_count - current).await?;
+        let mut response = list_files(client, folder_id, current, file_count - current).await?;
         current += response.files.len() as i32;
         files.append(&mut response.files);
     }
@@ -475,14 +475,22 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
                 let msg = ServerMsg::Download(DownloadMsg {
                     id,
                     state: DownloadState::Start(Box::new((
-                        file.info.name.as_str().into(),
+                        file.info.name.clone(),
                         file.info.size.unwrap(),
                     ))),
                 });
                 BROADCAST_TX.send_msg(msg);
-                files_to_download.push((id, file));
+                let bar_guard = DropGuard::new(id, |id| {
+                    let msg = ServerMsg::Download(DownloadMsg {
+                        id,
+                        state: DownloadState::Failed,
+                    });
+                    BROADCAST_TX.send_msg(msg);
+                });
+                files_to_download.push((bar_guard, file));
             }
             None => {
+                // wait for a while to avoid getting banned
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let mut new_files = list_all_files(client, &file.info.folder_id)
                     .await?
@@ -504,7 +512,7 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
     // restrict parallel downloading tasks
     let sema = Arc::new(Semaphore::new(5));
     let mut download_handles = Vec::new();
-    for (id, file) in files_to_download {
+    for (id_guard, file) in files_to_download {
         // wait for a while to avoid getting banned
         tokio::time::sleep(Duration::from_secs(1)).await;
         let DownloadInfo {
@@ -522,13 +530,26 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
             .expect("semaphore is not closed here");
         download_handles.push(tokio::spawn(async move {
             let _permit = permit;
-            download_file(&url, &path, id, file.info.size.unwrap()).await
+            let id = *id_guard.inner();
+            (
+                id_guard,
+                download_file(&url, &path, id, file.info.size.unwrap()).await,
+            )
         }));
     }
     let download_errors = join_all(download_handles)
         .await
         .into_iter()
-        .filter_map(|result| result.expect("task is not cancelled or panicked").err())
+        .filter_map(|result| {
+            let (id, res) = result.expect("task is not cancelled or panicked");
+            match res {
+                Ok(()) => {
+                    id.into_inner();
+                    None
+                }
+                Err(e) => Some((id.into_inner(), e)),
+            }
+        })
         .collect::<Vec<_>>();
     if !download_errors.is_empty() {
         return Err(CloudError::DownloadErrors(download_errors));
@@ -538,24 +559,15 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
 
 pub async fn check_cookies() -> Result<(), CatError> {
     match list_files(&CLIENT_WITH_RETRY, "0", 0, 1).await {
-        Ok(_) => {}
-        Err(e) => {
-            if let CloudError::Api(_) = e {
-                println!("Cookies is expired, try to update...");
-                let cookies = get_cloud_cookies().await?;
-                let temp_tx = TX.load();
-                let tx = temp_tx.as_ref().ok_or(CatError::Exit)?;
-                let notify = Arc::new(Notify::new());
-                let cmd = Box::new(|config: &mut Config| {
-                    config.cookies = cookies;
-                });
-                let msg = Message::new(cmd, Some(notify.clone()));
-                tx.send_msg(msg);
-                notify.notified().await;
-                println!("Cookies is now up to date!");
-            } else {
-                Err(e)?
-            }
+        Ok(_) => {
+            LOGIN_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Err(CloudError::Api(_)) => {
+            println!("Cookies is expired, please login again");
+            LOGIN_STATUS.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        error => {
+            error?;
         }
     }
     Ok(())
@@ -579,7 +591,7 @@ pub async fn get_file_info(
         .await?
         .text()
         .await?;
-    let result = serde_json::from_str::<FileInfoResponse>(&response).or_else(|e| {
+    let result = serde_json::from_str::<FileInfoResponse>(&response).map_err(|e| {
         let mut errors =
             format!("get file info: can not serialize list file response, error: {e}\n");
         match serde_json::from_str::<Errors>(&response) {
@@ -591,7 +603,7 @@ pub async fn get_file_info(
             }
             Err(e) => errors.push_str(&format!("get file info: can not get errors, error: {}", e)),
         }
-        Err(errors)
+        errors
     })?;
     Ok(result)
 }

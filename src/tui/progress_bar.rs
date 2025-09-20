@@ -1,8 +1,8 @@
-use std::{collections::HashMap, fmt, time::Instant};
-
-use bincode::{Decode, Encode};
-
 use crate::id::Id;
+use bincode::{Decode, Encode};
+use std::collections::HashMap;
+use std::fmt;
+use std::time::Instant;
 
 #[derive(Encode, Decode, Debug, Clone, Copy)]
 pub struct ProgressState {
@@ -23,9 +23,7 @@ pub trait Inc: BasicBar {
     fn inc(&mut self, delta: u64) {
         if self.current_size() + delta <= self.size() {
             self.set_current_size(self.current_size() + delta);
-        } else if self.current_size() == self.size() {
-            return;
-        } else {
+        } else if self.current_size() != self.size() {
             self.set_current_size(self.size());
         }
     }
@@ -207,7 +205,7 @@ impl SpeedSum for ProgressSuit<SimpleBar> {
     }
 }
 
-#[derive(Encode, Decode, Debug, Clone)]
+#[derive(Encode, Decode, Debug, Clone, Default)]
 pub struct ProgressSuit<T> {
     list: Vec<Id>,
     state: HashMap<Id, T>,

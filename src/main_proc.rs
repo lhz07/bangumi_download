@@ -1,28 +1,22 @@
-use std::{
-    collections::HashMap,
-    io,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::{
-    net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    select,
-    sync::{
-        Notify, Semaphore,
-        mpsc::{UnboundedReceiver, UnboundedSender},
-    },
-    task::JoinHandle,
-};
-
+use crate::cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list};
+use crate::config_manager::{Bangumi, CONFIG, Config, Message, SafeSend, modify_config};
+use crate::errors::{CatError, CloudError, DownloadError};
+use crate::id::Id;
+use crate::socket_utils::{Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, ServerMsg};
+use crate::update_rss::start_rss_receive;
 use crate::{
-    END_NOTIFY, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
-    cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list},
-    config_manager::{CONFIG, Config, Message, SafeSend, modify_config},
-    errors::{CatError, CloudError, DownloadError},
-    id::Id,
-    socket_utils::{AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, ServerMsg},
-    update_rss::start_rss_receive,
+    BROADCAST_TX, CLIENT_COUNT, END_NOTIFY, LOGIN_STATUS, RECOVERY_SIGNAL, REFRESH_DOWNLOAD,
+    REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
 };
+use std::collections::HashMap;
+use std::io;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::select;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{Notify, Semaphore};
+use tokio::task::JoinHandle;
 
 pub trait ConsumeSema {
     fn consume(&self) -> impl std::future::Future<Output = ()> + Send;
@@ -49,7 +43,7 @@ impl<'a, T: Clone> StatusIter<'a, T> {
     pub fn reset(&mut self) {
         self.index = 0;
     }
-    pub fn next(&mut self) -> &'a T {
+    pub fn next_status(&mut self) -> &'a T {
         if self.index < self.data.len() {
             let next_item = &self.data[self.index];
             self.index += 1;
@@ -61,24 +55,31 @@ impl<'a, T: Clone> StatusIter<'a, T> {
     }
 }
 
-pub async fn initialize() -> JoinHandle<()> {
+pub async fn initialize() -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     // -------------------------------------------------------------------------
     // initial config
-    if let Err(error) = Config::initial_config().await {
-        eprintln!("can not initialize config\n{error}");
-        std::process::exit(1);
-    }
+    Config::initial_config()
+        .await
+        .inspect_err(|error| eprintln!("can not initialize config\n{error}"))?;
     // launch config write thread
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
     TX.swap(Some(Arc::new(tx)));
     let config_manager = tokio::spawn(modify_config(rx));
     // -------------------------------------------------------------------------
-    if let Err(e) = check_cookies().await {
-        eprintln!("can not get valid cookies, error: {}", e);
-        std::process::exit(1);
-    }
+    check_cookies()
+        .await
+        .inspect_err(|e| eprintln!("can not check cookies, error: {}", e))?;
     // TODO: handle its error
     let _rss_refresh_handle = tokio::spawn(refresh_rss());
+    Ok(config_manager)
+}
+
+pub async fn refresh_rss() {
+    let waiter = RECOVERY_SIGNAL.get_waiter(crate::recovery_signal::WaiterKind::RefreshRss);
+    while !LOGIN_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("not logged in, waiting...");
+        waiter.wait().await;
+    }
     // TODO: add actual error handling instead of just printing it
     let download_handle = tokio::spawn(refresh_download());
     let download_slow_handle = tokio::spawn(refresh_download_slow());
@@ -87,32 +88,60 @@ pub async fn initialize() -> JoinHandle<()> {
         .lock()
         .await
         .replace(download_slow_handle);
-    config_manager
-}
-
-pub async fn refresh_rss() {
     loop {
         println!("\nChecking updates...\n");
-        let rss_links = &CONFIG.load_full().rss_links;
-        let urls = rss_links.values().map(|(_, url)| url).collect::<Vec<_>>();
-        if let Err(e) = start_rss_receive(urls).await {
-            eprintln!("start rss receive error: {}", e);
-            END_NOTIFY.notify_waiters();
-            break;
-        }
-        println!("\nCheck finished!\n");
-        println!("refresh rss is sleeping");
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(2700)) => {}
-            _ = END_NOTIFY.notified() => {
-                println!("break refresh rss!");
-                break;
+        BROADCAST_TX.send_msg(ServerMsg::Loading);
+        if let Err(e) = start_rss_receive().await {
+            eprintln!("start rss receive error: {}, waiting for recovery", e);
+            tokio::select! {
+                _ = waiter.wait() => {}
+                _ = END_NOTIFY.notified() => {
+                    println!("break refresh rss!");
+                    break;
+                }
+            }
+            // END_NOTIFY.notify_waiters();
+            // break;
+        } else {
+            println!("\nCheck finished!\n");
+            // to avoid cloning data when no client is connected
+            if CLIENT_COUNT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                let config = CONFIG.load();
+                let last_updates = &config.bangumi;
+                let animes = config
+                    .rss_links
+                    .iter()
+                    .map(|(id, (name, rss_link))| {
+                        let latest = match last_updates.get(id) {
+                            Some(str) => str.clone(),
+                            None => Bangumi::default(),
+                        };
+                        Anime {
+                            id: id.clone(),
+                            name: name.clone(),
+                            rss_link: rss_link.clone(),
+                            last_update: latest.last_update,
+                            latest_episode: latest.latest_episode,
+                        }
+                    })
+                    .collect::<Box<_>>();
+                BROADCAST_TX.send_msg(ServerMsg::RSSData(animes));
+            }
+            println!("refresh rss is sleeping");
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2700)) => {}
+                _ = END_NOTIFY.notified() => {
+                    println!("break refresh rss!");
+                    break;
+                }
             }
         }
     }
     println!("exit refresh rss");
 }
 // TODO: handle error and use this function
+// we should check the error immediately instead of checking
+// it next time
 pub async fn check_refresh_download_error() {
     if let Err(e) = refresh_download().await {
         eprintln!("{e}")
@@ -207,11 +236,15 @@ pub async fn refresh_download() -> Result<(), CatError> {
                 }
             }
         }
-        let wait_task = tokio::time::timeout(*wait_time.next(), REFRESH_NOTIFY.consume());
+        let wait_task = tokio::time::timeout(*wait_time.next_status(), REFRESH_NOTIFY.consume());
         tokio::select! {
             result = wait_task => {
                 match result {
-                    Ok(_) => wait_time.reset(),
+                    Ok(_) => {
+                        wait_time.reset();
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    },
                     Err(_) => continue,
                 }
             }
@@ -232,7 +265,10 @@ pub async fn restart_refresh_download() -> Result<(), CatError> {
         .take_if(|h| h.is_finished());
     if let Some(h) = handle {
         match h.await? {
-            Ok(()) => (),
+            Ok(()) => {
+                let download_handle = tokio::spawn(refresh_download());
+                REFRESH_DOWNLOAD.lock().await.replace(download_handle);
+            }
             Err(CatError::Cloud(CloudError::Download(DownloadError::Request(e)))) => {
                 eprintln!("{}", e);
                 let download_handle = tokio::spawn(refresh_download());
@@ -251,7 +287,10 @@ pub async fn restart_refresh_download_slow() -> Result<(), CatError> {
         .take_if(|h| h.is_finished());
     if let Some(h) = handle {
         match h.await? {
-            Ok(()) => (),
+            Ok(()) => {
+                let download_handle = tokio::spawn(refresh_download_slow());
+                REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
+            }
             Err(CatError::Cloud(CloudError::Download(DownloadError::Request(e)))) => {
                 eprintln!("{}", e);
                 let download_handle = tokio::spawn(refresh_download_slow());
@@ -354,8 +393,6 @@ pub async fn write_socket(
     while let Some(msg) = rx.recv().await {
         write.write_msg(msg).await?;
     }
-    // TODO: exit earlier
-    println!("write msg to socket exit!");
     Ok(())
 }
 
@@ -392,12 +429,7 @@ pub async fn read_socket(
         select! {
             result = read.read_msg() => {
                 let msg = result?;
-                let to_exit = matches!(&msg, ClientMsg::Exit);
                 tx.send_msg((id, msg));
-                if to_exit {
-                    println!("read msg from socket exit!");
-                    break;
-                }
             }
             _ = END_NOTIFY.notified() => {break;}
         }

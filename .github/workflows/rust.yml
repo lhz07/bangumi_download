@@ -2,9 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
   pull_request:
-    branches: [ "master" ]
+    branches: ["master"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,43 +14,47 @@ jobs:
     name: build on macOS
     runs-on: macos-15
     steps:
-    - name: Add target
-      run: rustup target add x86_64-unknown-linux-musl
-    - name: Install dependencies
-      run: brew install filosottile/musl-cross/musl-cross
-    - name: Pull code
-      uses: actions/checkout@v4.2.2
-    - name: Check format
-      run: cargo fmt --check
-    - name: Build for macOS
-      run: cargo build --verbose --release
-    - name: Cross compile for Linux
-      run: cargo build --verbose --release --target x86_64-unknown-linux-musl
-    - name: Upload the build artifact
-      uses: actions/upload-artifact@v4.6.2
-      with:
-        name: aarch64-apple-darwin
-        path: target/release/bangumi_download
-    - name: Run tests
-      run: cargo test --verbose
+      - name: Add target
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Install dependencies
+        run: brew install filosottile/musl-cross/musl-cross
+      - name: Pull code
+        uses: actions/checkout@v4.2.2
+      - name: Install rustfmt
+        run: rustup component add --toolchain nightly-aarch64-apple-darwin rustfmt
+      - name: Check format
+        run: cargo +nightly fmt --check
+      - name: Build for macOS
+        run: cargo build --verbose --release
+      - name: Cross compile for Linux
+        run: cargo build --verbose --release --target x86_64-unknown-linux-musl
+      - name: Upload the build artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: aarch64-apple-darwin
+          path: target/release/bangumi_download
+      - name: Run tests
+        run: cargo test --verbose
   build_on_linux:
     name: build on Linux
     runs-on: ubuntu-latest
     steps:
-    - name: Add target
-      run: rustup target add x86_64-unknown-linux-musl
-    - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y musl-tools
-    - name: Pull code
-      uses: actions/checkout@v4.2.2
-    - name: Check format
-      run: cargo fmt --check
-    - name: Build for Linux
-      run: cargo build --verbose --release --target x86_64-unknown-linux-musl
-    - name: Upload the build artifact
-      uses: actions/upload-artifact@v4.6.2
-      with:
-        name: x86_64_linux-musl
-        path: target/x86_64-unknown-linux-musl/release/bangumi_download
-    - name: Run tests
-      run: cargo test --verbose
+      - name: Add target
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Pull code
+        uses: actions/checkout@v4.2.2
+      - name: Install rustfmt
+        run: rustup component add --toolchain nightly-x86_64-unknown-linux-gnu rustfmt
+      - name: Check format
+        run: cargo +nightly fmt --check
+      - name: Build for Linux
+        run: cargo build --verbose --release --target x86_64-unknown-linux-musl
+      - name: Upload the build artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: x86_64_linux-musl
+          path: target/x86_64-unknown-linux-musl/release/bangumi_download
+      - name: Run tests
+        run: cargo test --verbose

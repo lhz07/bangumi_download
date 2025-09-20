@@ -1,5 +1,8 @@
 pub mod app;
+pub mod confirm_widget;
 pub mod events;
+pub mod input_widget;
+pub mod loading_widget;
 pub mod notification_widget;
 pub mod progress_bar;
 pub mod qrcode_widget;

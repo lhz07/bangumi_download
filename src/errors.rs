@@ -1,3 +1,4 @@
+use crate::id::Id;
 use base64::DecodeError;
 use reqwest::header::InvalidHeaderValue;
 use thiserror::Error;
@@ -8,6 +9,8 @@ pub enum CatError {
     Socket(#[from] SocketError),
     #[error("RSS parse error: {0}")]
     RSS(#[from] quick_xml::de::DeError),
+    #[error("RSS Date time error: {0}")]
+    RSSDateTime(#[from] chrono::ParseError),
     #[error("Thread Join error: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("Bangumi parse error: {0}")]
@@ -20,7 +23,7 @@ pub enum CatError {
     GetCookie(String),
     #[error("Deserialize error: {0}")]
     Deserialize(#[from] serde_json::Error),
-    #[error("Exiting now...")]
+    #[error("Can not write to config because the program is exiting now...")]
     Exit,
 }
 
@@ -41,7 +44,7 @@ pub enum CloudError {
     #[error("Param error: {0}")]
     Param(String),
     #[error("Download errors: {0:?}")]
-    DownloadErrors(Vec<DownloadError>),
+    DownloadErrors(Vec<(Id, DownloadError)>),
 }
 
 #[derive(Error, Debug)]
@@ -147,5 +150,22 @@ impl From<String> for RequestError {
 impl From<String> for DownloadError {
     fn from(value: String) -> Self {
         Self::Request(RequestError::Status(value))
+    }
+}
+
+pub trait ConsumeError<T> {
+    fn consume_error<F>(self, closure: F)
+    where
+        F: FnOnce(T);
+}
+
+impl<T> ConsumeError<T> for Result<(), T> {
+    fn consume_error<F>(self, closure: F)
+    where
+        F: FnOnce(T),
+    {
+        if let Err(e) = self {
+            closure(e);
+        }
     }
 }
