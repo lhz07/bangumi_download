@@ -33,7 +33,6 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::errors::CatError;
-use crate::recovery_signal::RecoverySignal;
 use crate::socket_utils::ServerMsg;
 pub const PC_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
@@ -112,5 +111,4 @@ pub static READY_TO_EXIT: AtomicBool = AtomicBool::new(false);
 pub static UTC_8: FixedOffset = FixedOffset::east_opt(8 * 3600).unwrap();
 pub static RSS_DATA_PERMIT: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
 pub static LOGIN_STATUS: AtomicBool = AtomicBool::new(false);
-pub static RECOVERY_SIGNAL: Lazy<RecoverySignal> = Lazy::new(|| RecoverySignal::new(3));
 pub static CLIENT_COUNT: AtomicUsize = AtomicUsize::new(0);

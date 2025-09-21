@@ -5,14 +5,14 @@ use crate::id::Id;
 use crate::main_proc::{
     read_socket, restart_refresh_download, restart_refresh_download_slow, write_socket,
 };
+use crate::recovery_signal::{RECOVERY_SIGNAL, Waiting};
 use crate::time_stamp::TimeStamp;
 use crate::tui::progress_bar::{
     BasicBar, Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar,
 };
 use crate::update_rss::{check_rss_link, rss_receive, start_rss_receive};
 use crate::{
-    BROADCAST_TX, CLIENT_COUNT, CLIENT_WITH_RETRY, END_NOTIFY, LOGIN_STATUS, RECOVERY_SIGNAL,
-    RSS_DATA_PERMIT, TX,
+    BROADCAST_TX, CLIENT_COUNT, CLIENT_WITH_RETRY, END_NOTIFY, LOGIN_STATUS, RSS_DATA_PERMIT, TX,
 };
 use bincode::{Decode, Encode};
 use std::collections::HashMap;
@@ -358,6 +358,7 @@ impl SocketListener {
                                     notify.notified().await;
                                     BROADCAST_TX
                                         .send_msg(ServerMsg::Ok("Successfully logged in".into()));
+                                    LOGIN_STATUS.store(true, std::sync::atomic::Ordering::Relaxed);
                                     RECOVERY_SIGNAL.recover();
                                     BROADCAST_TX.send_msg(ServerMsg::IsLogin(true));
                                 }
@@ -492,19 +493,28 @@ impl SocketListener {
                 }
             }
             ClientMsg::GetFilters => {
-                let config_guard = CONFIG.load();
-                let filters = config_guard
-                    .filter
-                    .clone()
-                    .into_iter()
-                    .map(|(id, subgroup)| Filter { id, subgroup })
-                    .collect();
-                BROADCAST_TX.send_msg(ServerMsg::SubFilter(filters));
+                if let Some(tx) = self.stream_write_txs.get(&msg_id) {
+                    let config_guard = CONFIG.load();
+                    let filters = config_guard
+                        .filter
+                        .clone()
+                        .into_iter()
+                        .map(|(id, subgroup)| Filter { id, subgroup })
+                        .collect();
+                    tx.send_msg(ServerMsg::SubFilter(filters));
+                }
             }
             ClientMsg::InsertFilter(filter) => match TX.load().as_ref() {
                 Some(tx) => {
-                    let cmd = Box::new(|config: &mut Config| {
-                        config.filter.insert(filter.id, filter.subgroup);
+                    let cmd = Box::new(move |config: &mut Config| {
+                        match config.filter.get_mut(&filter.id) {
+                            Some(s) => {
+                                s.filter_list = filter.subgroup.filter_list;
+                            }
+                            None => {
+                                config.filter.insert(filter.id, filter.subgroup);
+                            }
+                        }
                     });
                     let msg = Message::new(cmd, None);
                     tx.send_msg(msg);
@@ -525,6 +535,12 @@ impl SocketListener {
                     eprintln!("Can not modify filter rule, error: {}", CatError::Exit);
                 }
             },
+            ClientMsg::GetWaitingState => {
+                if let Some(tx) = self.stream_write_txs.get(&msg_id) {
+                    let state = RECOVERY_SIGNAL.get_waiting_state();
+                    tx.send_msg(ServerMsg::WaitingState(state));
+                }
+            }
             ClientMsg::Exit => {
                 println!("Received client exit message");
                 self.stream_write_txs.remove(&msg_id);
@@ -723,6 +739,7 @@ pub enum ServerMsg {
     Ok(Box<str>),
     Info(Box<str>),
     RSSData(Box<[Anime]>),
+    WaitingState(Waiting),
     Loading,
     SubFilter(Box<[Filter]>),
     /// - (error_info, error)
@@ -738,6 +755,7 @@ pub enum ClientMsg {
     DownloadFolder(Box<str>),
     LoginReq,
     GetFilters,
+    GetWaitingState,
     InsertFilter(Filter),
     /// - id
     DelFilter(String),

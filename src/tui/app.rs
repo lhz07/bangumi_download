@@ -1,4 +1,5 @@
 use crate::config_manager::SafeSend;
+use crate::recovery_signal::Waiting;
 use crate::socket_utils::{
     Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, Filter, SocketPath,
 };
@@ -82,6 +83,7 @@ pub struct App {
     pub(crate) loading_state: Option<LoadingState>,
     pub(crate) is_logged_in: bool,
     pub(crate) filters: Vec<Filter>,
+    pub(crate) waiting_state: Waiting,
 }
 
 impl App {
@@ -129,8 +131,10 @@ impl App {
             loading_state: None,
             is_logged_in: false,
             filters: Vec::new(),
+            waiting_state: Waiting::default(),
         };
         app.socket_tx.send_msg(ClientMsg::SyncQuery);
+        app.socket_tx.send_msg(ClientMsg::GetWaitingState);
         (app, event_rx, handles)
     }
     pub async fn receive_ui_events(tx: UnboundedSender<LEvent>) -> io::Result<()> {

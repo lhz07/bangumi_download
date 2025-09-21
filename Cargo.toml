@@ -33,3 +33,4 @@ log = "0.4.27"
 tui-logger = "0.17.3"
 url = "2.5.4"
 chrono = { version = "0.4.42", features = ["serde"] }
+strum = { version = "0.27.2", features = ["derive"] }

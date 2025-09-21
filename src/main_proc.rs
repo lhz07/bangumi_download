@@ -2,11 +2,12 @@ use crate::cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get
 use crate::config_manager::{Bangumi, CONFIG, Config, Message, SafeSend, modify_config};
 use crate::errors::{CatError, CloudError, DownloadError};
 use crate::id::Id;
+use crate::recovery_signal::RECOVERY_SIGNAL;
 use crate::socket_utils::{Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, ServerMsg};
 use crate::update_rss::start_rss_receive;
 use crate::{
-    BROADCAST_TX, CLIENT_COUNT, END_NOTIFY, LOGIN_STATUS, RECOVERY_SIGNAL, REFRESH_DOWNLOAD,
-    REFRESH_DOWNLOAD_SLOW, REFRESH_NOTIFY, TX,
+    BROADCAST_TX, CLIENT_COUNT, END_NOTIFY, LOGIN_STATUS, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW,
+    REFRESH_NOTIFY, TX,
 };
 use std::collections::HashMap;
 use std::io;

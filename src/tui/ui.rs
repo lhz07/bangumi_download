@@ -1,3 +1,4 @@
+use crate::recovery_signal::WaiterKind;
 use crate::tui::app::App;
 use crate::tui::confirm_widget::{ActionConfirm, ConfirmWidget};
 use crate::tui::input_widget::InputWidget;
@@ -8,11 +9,12 @@ use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, Tabs,
-    Wrap,
+    Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+    Table, Tabs, Wrap,
 };
 use std::borrow::Cow;
 use std::io;
+use strum::{EnumCount, VariantArray};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum CurrentScreen {
@@ -20,6 +22,7 @@ pub enum CurrentScreen {
     Downloading,
     Finished,
     Filter,
+    State,
     Log,
 }
 
@@ -107,14 +110,24 @@ pub fn render(app: &mut App) -> io::Result<()> {
             downloading_tab,
             "Finished".to_string(),
             "Filter Rules".to_string(),
+            "Running State".to_string(),
             "Log".to_string(),
         ])
         .select(app.current_screen as usize);
         let main_layout =
             Layout::vertical([Constraint::Min(2), Constraint::Percentage(100)]).split(f.area());
-        let tab_title_area = main_layout[0];
+        let tab_horizontal_layout =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(3)]).split(main_layout[0]);
+        let tab_title_area = tab_horizontal_layout[0];
+        let tab_status_area = tab_horizontal_layout[1];
         let tab_content_area = main_layout[1];
         f.render_widget(tabs, tab_title_area);
+        let status = if app.waiting_state.waiting_count > 0 {
+            Span::raw("X").red()
+        } else {
+            Span::raw("✓").green()
+        };
+        f.render_widget(status, tab_status_area);
 
         if app.current_screen != CurrentScreen::Downloading {
             app.downloading_state
@@ -347,6 +360,29 @@ pub fn render(app: &mut App) -> io::Result<()> {
                         .highlight_symbol(symbol);
                     f.render_stateful_widget(list, filter_area, &mut app.filter_rule_state);
                 }
+            }
+            CurrentScreen::State => {
+                let mut rows = Vec::with_capacity(WaiterKind::COUNT);
+                for (i, state) in app.waiting_state.states.iter().enumerate() {
+                    let status = if *state {
+                        Text::raw("\nStopped").red()
+                    } else {
+                        Text::raw("\nWorking").green()
+                    };
+                    rows.push(
+                        Row::new([Text::from(format!("\n{}", WaiterKind::VARIANTS[i])), status])
+                            .height(2),
+                    );
+                }
+                let header = Row::new(["Name", "Status"])
+                    .style(Style::default().bold())
+                    .height(1);
+                let table = Table::default()
+                    .rows(rows)
+                    .header(header)
+                    .block(Block::default().borders(Borders::ALL).title("Services"))
+                    .widths(&[Constraint::Percentage(40), Constraint::Fill(1)]);
+                f.render_widget(table, tab_content_area);
             }
             CurrentScreen::Log => {
                 let logs = tui_logger::TuiLoggerWidget::default()

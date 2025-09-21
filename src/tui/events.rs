@@ -185,6 +185,9 @@ impl LEvent {
                             app.filter_rule_state.select(None);
                             app.filters = filters.into_vec();
                         }
+                        ServerMsg::WaitingState(state) => {
+                            app.waiting_state = state;
+                        }
                         ServerMsg::Exit => {
                             log::info!("Received exit message, exiting...");
                             READY_TO_EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -215,7 +218,7 @@ impl LEvent {
                 match key.code {
                     KeyCode::Up => {
                         if let Some(index) = app.filter_rule_state.selected()
-                            && index as isize > 0
+                            && index > 0
                         {
                             let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
                             filter.subgroup.filter_list.swap(index, index - 1);
@@ -275,6 +278,9 @@ impl LEvent {
                             }
                         }
                         '5' => {
+                            app.current_screen = CurrentScreen::State;
+                        }
+                        '6' => {
                             app.current_screen = CurrentScreen::Log;
                         }
                         char if app.current_screen == CurrentScreen::Main
