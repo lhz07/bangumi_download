@@ -475,6 +475,13 @@ impl LEvent {
                             },
                             _ => (),
                         },
+                        char if app.current_screen == CurrentScreen::State => match char {
+                            'r' if app.waiting_state.waiting_count > 0 => {
+                                // send recovery signal
+                                app.socket_tx.send_msg(ClientMsg::Recover);
+                            }
+                            _ => (),
+                        },
                         _ => (),
                     },
                     InputState::Text(str) => {

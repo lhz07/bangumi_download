@@ -541,6 +541,9 @@ impl SocketListener {
                     tx.send_msg(ServerMsg::WaitingState(state));
                 }
             }
+            ClientMsg::Recover => {
+                RECOVERY_SIGNAL.recover();
+            }
             ClientMsg::Exit => {
                 println!("Received client exit message");
                 self.stream_write_txs.remove(&msg_id);
@@ -756,6 +759,7 @@ pub enum ClientMsg {
     LoginReq,
     GetFilters,
     GetWaitingState,
+    Recover,
     InsertFilter(Filter),
     /// - id
     DelFilter(String),
