@@ -46,7 +46,7 @@ impl Default for Waiter {
     }
 }
 
-pub static RECOVERY_SIGNAL: Lazy<RecoverySignal> = Lazy::new(|| RecoverySignal::new());
+pub static RECOVERY_SIGNAL: Lazy<RecoverySignal> = Lazy::new(RecoverySignal::new);
 
 impl Default for Waiting {
     fn default() -> Self {
@@ -66,6 +66,12 @@ pub enum WaiterKind {
 
 pub struct RecoverySignal {
     waiters: [Arc<Waiter>; WaiterKind::COUNT],
+}
+
+impl Default for RecoverySignal {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecoverySignal {
@@ -99,6 +105,7 @@ impl RecoverySignal {
     }
 }
 
+#[cfg(not(miri))]
 #[tokio::test]
 async fn test() {
     use futures::future::join;

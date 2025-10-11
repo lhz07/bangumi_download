@@ -1,3 +1,4 @@
+pub mod cas_guard;
 pub mod cloud;
 pub mod cloud_manager;
 pub mod config_manager;
@@ -16,6 +17,9 @@ pub mod update_rss;
 #[cfg(test)]
 pub mod tests;
 
+use crate::cas_guard::CASGuard;
+use crate::errors::CatError;
+use crate::socket_utils::ServerMsg;
 use arc_swap::ArcSwapOption;
 use chrono::FixedOffset;
 use cloud_manager::MOBILE_UA;
@@ -29,11 +33,9 @@ use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 
-use crate::errors::CatError;
-use crate::socket_utils::ServerMsg;
 pub const PC_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -102,9 +104,10 @@ pub static BROADCAST_TX: Lazy<UnboundedSender<ServerMsg>> = Lazy::new(|| {
 });
 pub static mut BROADCAST_RX: *mut ManuallyDrop<UnboundedReceiver<ServerMsg>> = std::ptr::null_mut();
 pub static ERROR_STATUS: AtomicBool = AtomicBool::new(false);
-type DownloadHandle = Mutex<Option<JoinHandle<Result<(), CatError>>>>;
-pub static REFRESH_DOWNLOAD: Lazy<DownloadHandle> = Lazy::new(|| Mutex::new(None));
-pub static REFRESH_DOWNLOAD_SLOW: Lazy<DownloadHandle> = Lazy::new(|| Mutex::new(None));
+type DownloadHandle = Option<JoinHandle<Result<(), CatError>>>;
+// pub static REFRESH_DOWNLOAD: Lazy<DownloadHandle> = Lazy::new(|| Mutex::new(None));
+pub static REFRESH_DOWNLOAD: CASGuard<DownloadHandle> = CASGuard::new(None);
+pub static REFRESH_DOWNLOAD_SLOW: CASGuard<DownloadHandle> = CASGuard::new(None);
 pub static REFRESH_NOTIFY: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(0));
 pub static END_NOTIFY: Lazy<Notify> = Lazy::new(Notify::new);
 pub static READY_TO_EXIT: AtomicBool = AtomicBool::new(false);

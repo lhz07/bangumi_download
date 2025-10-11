@@ -381,7 +381,7 @@ pub fn render(app: &mut App) -> io::Result<()> {
                     .rows(rows)
                     .header(header)
                     .block(Block::default().borders(Borders::ALL).title("Services"))
-                    .widths(&[Constraint::Percentage(40), Constraint::Fill(1)]);
+                    .widths([Constraint::Percentage(40), Constraint::Fill(1)]);
                 f.render_widget(table, tab_content_area);
             }
             CurrentScreen::Log => {

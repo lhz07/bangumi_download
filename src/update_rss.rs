@@ -113,10 +113,8 @@ pub async fn start_rss_receive() -> Result<(), CatError> {
             Err(e) => Err(e)?,
         }
     }
-    println!("restart refresh download in rss receive");
     restart_refresh_download().await?;
     restart_refresh_download_slow().await?;
-    println!("finish restart refresh download");
     Ok(())
 }
 

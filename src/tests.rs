@@ -17,6 +17,7 @@ use std::sync::Arc;
 // when the tests are failed
 // These tests only test part of the functions
 
+#[cfg(not(miri))]
 #[tokio::test]
 async fn test_get_a_magnet_link() {
     use crate::update_rss::get_a_magnet_link;
@@ -43,6 +44,7 @@ async fn test_get_a_magnet_link() {
     );
 }
 
+#[cfg(not(miri))]
 #[tokio::test]
 async fn test_check_rss_link_and_url_parse() {
     use crate::update_rss::check_rss_link;
@@ -141,6 +143,7 @@ async fn test_check_rss_link_and_url_parse() {
     }
 }
 
+#[cfg(not(miri))]
 #[test]
 fn test_extract_magnet_hash() {
     use crate::cloud_manager::extract_magnet_hash;
@@ -162,6 +165,7 @@ fn test_extract_magnet_hash() {
     }
 }
 
+#[cfg(not(miri))]
 #[tokio::test]
 async fn test_status_iter() {
     use crate::REFRESH_NOTIFY;
@@ -192,6 +196,7 @@ async fn test_status_iter() {
     assert_eq!(timer.elapsed().as_secs(), 1);
 }
 
+#[cfg(not(miri))]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_xml() {
     use crate::update_rss::{RSS, get_response_text};
@@ -216,12 +221,14 @@ async fn test_xml() {
     let _result = de::from_str::<RSS>(&response).unwrap();
 }
 
+#[cfg(not(miri))]
 #[test]
 fn test_serialize_config() {
     let config_str = read_to_string("tests/config.json").unwrap();
     let _config = serde_json::from_str::<Config>(&config_str).unwrap();
 }
 
+#[cfg(not(miri))]
 #[tokio::test]
 async fn config_test() {
     use config_manager::CONFIG;
@@ -280,28 +287,7 @@ async fn config_test() {
     assert_eq!(result, expect_result);
 }
 
-// this is an example of deadlock
-#[tokio::test]
-async fn deadlock() {
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::sync::Mutex;
-
-    let mutex = Arc::new(Mutex::new(Some("dummy")));
-    let m1 = mutex.clone();
-
-    if let Some(_) = m1.lock().await.take() {
-        // lock here
-        match tokio::time::timeout(Duration::from_secs(2), m1.lock()).await {
-            Ok(_) => {
-                println!("got lock");
-                unreachable!("it should be deadlock here");
-            }
-            Err(e) => eprintln!("can not lock: {}", e),
-        }
-    }
-}
-
+#[cfg(not(miri))]
 #[test]
 fn test_xor() {
     use crypto::xor;
@@ -315,6 +301,7 @@ fn test_xor() {
     println!("{:?}", buf);
 }
 
+#[cfg(not(miri))]
 #[test]
 fn test_encode() {
     let key = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
@@ -436,17 +423,7 @@ async fn test_get_file_info() {
     println!("{:?}", result);
 }
 
-// #[tokio::test]
-// #[ignore = "this test is slow"]
-// async fn test_multi_thread_download() {
-//     download_file(
-//         "https://dldir1v6.qq.com/qqfile/qq/QQNT/Mac/QQ_6.9.75_250710_01.dmg",
-//         Path::new("downloads/qq"),
-//     )
-//     .await
-//     .unwrap();
-// }
-
+#[cfg(not(miri))]
 #[tokio::test]
 async fn test_bincode() {
     let socket_path = SocketPath::new("bangumi_download_test.socket");

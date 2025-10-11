@@ -82,13 +82,8 @@ pub async fn refresh_rss() {
         waiter.wait().await;
     }
     // TODO: add actual error handling instead of just printing it
-    let download_handle = tokio::spawn(refresh_download());
-    let download_slow_handle = tokio::spawn(refresh_download_slow());
-    REFRESH_DOWNLOAD.lock().await.replace(download_handle);
-    REFRESH_DOWNLOAD_SLOW
-        .lock()
-        .await
-        .replace(download_slow_handle);
+    restart_refresh_download().await.unwrap();
+    restart_refresh_download_slow().await.unwrap();
     loop {
         println!("\nChecking updates...\n");
         BROADCAST_TX.send_msg(ServerMsg::Loading);
@@ -260,45 +255,64 @@ pub async fn refresh_download() -> Result<(), CatError> {
 
 pub async fn restart_refresh_download() -> Result<(), CatError> {
     REFRESH_NOTIFY.add_permits(1);
-    let handle = REFRESH_DOWNLOAD_SLOW
-        .lock()
-        .await
-        .take_if(|h| h.is_finished());
-    if let Some(h) = handle {
-        match h.await? {
+    let mut handle_guard = match REFRESH_DOWNLOAD.lock() {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    let handle = &mut *handle_guard;
+    let restart = |handle: &mut Option<JoinHandle<Result<(), CatError>>>| {
+        let download_handle = tokio::spawn(refresh_download());
+        *handle = Some(download_handle);
+    };
+    match handle {
+        Some(h) if h.is_finished() => match h.await? {
             Ok(()) => {
-                let download_handle = tokio::spawn(refresh_download());
-                REFRESH_DOWNLOAD.lock().await.replace(download_handle);
+                println!("restart refresh download");
+                restart(handle);
             }
             Err(CatError::Cloud(CloudError::Download(DownloadError::Request(e)))) => {
                 eprintln!("{}", e);
-                let download_handle = tokio::spawn(refresh_download());
-                REFRESH_DOWNLOAD.lock().await.replace(download_handle);
+                restart(handle);
             }
             Err(e) => Err(e)?,
+        },
+        None => {
+            println!("start refresh download for the first time");
+            restart(handle);
         }
+        _ => println!("refresh download is running"),
     }
+
     Ok(())
 }
 
 pub async fn restart_refresh_download_slow() -> Result<(), CatError> {
-    let handle = REFRESH_DOWNLOAD_SLOW
-        .lock()
-        .await
-        .take_if(|h| h.is_finished());
-    if let Some(h) = handle {
-        match h.await? {
+    let mut handle_guard = match REFRESH_DOWNLOAD_SLOW.lock() {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    let handle = &mut *handle_guard;
+    let restart = |handle: &mut Option<JoinHandle<Result<(), CatError>>>| {
+        let download_handle = tokio::spawn(refresh_download_slow());
+        *handle = Some(download_handle);
+    };
+    match handle {
+        Some(h) if h.is_finished() => match h.await? {
             Ok(()) => {
-                let download_handle = tokio::spawn(refresh_download_slow());
-                REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
+                println!("restart refresh download slow");
+                restart(handle);
             }
             Err(CatError::Cloud(CloudError::Download(DownloadError::Request(e)))) => {
                 eprintln!("{}", e);
-                let download_handle = tokio::spawn(refresh_download_slow());
-                REFRESH_DOWNLOAD_SLOW.lock().await.replace(download_handle);
+                restart(handle);
             }
             Err(e) => Err(e)?,
+        },
+        None => {
+            println!("start refresh download slow for the first time");
+            restart(handle);
         }
+        _ => println!("refresh download slow is running"),
     }
     Ok(())
 }
