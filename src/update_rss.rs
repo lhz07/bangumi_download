@@ -118,8 +118,8 @@ pub async fn start_rss_receive() -> Result<(), CatError> {
     Ok(())
 }
 
-pub fn filter_episode<'a, T: Filter>(
-    items: &'a Vec<T>,
+pub fn filter_episode<'a, T: Filter + 'a>(
+    items: impl Iterator<Item = &'a T> + Clone,
     filter: &HashMap<String, SubGroup>,
     sub_id: &str,
 ) -> Vec<&'a str> {
@@ -131,7 +131,7 @@ pub fn filter_episode<'a, T: Filter>(
         None => empty_filter.iter().chain(default_filters.iter()),
     };
     'outer: for candidate_filter in candidate_filters {
-        for item in items {
+        for item in items.clone() {
             if item.title().contains(candidate_filter) {
                 best_filter = Some(candidate_filter);
                 break 'outer;
@@ -140,7 +140,6 @@ pub fn filter_episode<'a, T: Filter>(
     }
     match best_filter {
         Some(best_filter) => items
-            .iter()
             .filter_map(|item| {
                 if item.title().contains(best_filter) {
                     println!("{}", item.title());
@@ -151,7 +150,6 @@ pub fn filter_episode<'a, T: Filter>(
             })
             .collect::<Vec<_>>(),
         None => items
-            .iter()
             .map(|item| {
                 println!("{}", item.title());
                 item.link()
@@ -188,7 +186,8 @@ pub async fn get_all_episode_magnet_links(
                 ))?,
         });
     }
-    let magnet_links = filter_episode(&items, filter, sub_id)
+    let items_iter = items.iter();
+    let magnet_links = filter_episode(items_iter, filter, sub_id)
         .iter()
         .map(|link| link.to_string())
         .collect();
@@ -345,8 +344,10 @@ pub async fn rss_receive(
                 .rss_links
                 .insert(insert_id, (insert_title, insert_url));
         });
-        let msg = Message::new(cmd, None);
+        let notify = Arc::new(Notify::new());
+        let msg = Message::new(cmd, Some(notify.clone()));
         tx.send_msg(msg);
+        notify.notified().await;
     } else if latest_update <= old_bangumi_dict[&bangumi_id].last_update {
         update_subgroup_name(None).await?;
         let title = &old_config.rss_links[&bangumi_id].0;
@@ -369,10 +370,10 @@ pub async fn rss_receive(
         // we have ensured that there is always at least one episode that we have not downloaded,
         // so index >= 1
         items.truncate(index);
-        items.reverse();
+        let items_iter = items.iter().rev();
         println!("获取到以下剧集：");
         let filter = &old_config.filter;
-        let item_links = filter_episode(&items, filter, &sub_id);
+        let item_links = filter_episode(items_iter, filter, &sub_id);
         magnet_links = get_all_magnet(item_links).await?;
     }
     let title = old_config.rss_links[&bangumi_id].0.clone();

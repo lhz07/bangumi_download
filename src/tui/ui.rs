@@ -1,6 +1,7 @@
 use crate::recovery_signal::WaiterKind;
 use crate::tui::app::App;
 use crate::tui::confirm_widget::{ActionConfirm, ConfirmWidget};
+use crate::tui::editor::Editor;
 use crate::tui::input_widget::InputWidget;
 use crate::tui::notification_widget::NotificationWidget;
 use crate::tui::progress_bar::{BasicBar, SpeedSum};
@@ -35,62 +36,48 @@ pub enum Popup {
 
 pub enum InputState {
     NotInput,
-    Text(String),
-    SelectedAll(String),
+    Text(Editor),
 }
 
-impl<'a> From<&'a InputState> for Text<'a> {
-    fn from(value: &'a InputState) -> Self {
-        match value {
-            InputState::NotInput => Text::from(""),
-            InputState::Text(str) => Text::from(str.as_str()).not_reversed(),
-            InputState::SelectedAll(str) => Text::from(str.as_str()).reversed(),
-        }
-    }
-}
 impl<'a> From<&'a InputState> for Line<'a> {
     fn from(value: &'a InputState) -> Self {
         match value {
             InputState::NotInput => Line::from(""),
-            InputState::Text(str) => Line::from(Span::raw(str.as_str()).not_reversed()),
-            InputState::SelectedAll(str) => Line::from(Span::raw(str.as_str()).reversed()),
+            InputState::Text(editor) => editor.to_line(),
         }
     }
 }
+// impl<'a> From<&'a InputState> for Line<'a> {
+//     fn from(value: &'a InputState) -> Self {
+//         match value {
+//             InputState::NotInput => Line::from(""),
+//             InputState::Text(inner) => Line::from(Span::raw(inner.str.as_str()).not_reversed()),
+//             InputState::SelectedAll(str) => Line::from(Span::raw(str.as_str()).reversed()),
+//         }
+//     }
+// }
 
 impl InputState {
-    pub fn to_selected(&mut self) {
-        let old = std::mem::replace(self, Self::NotInput);
-        if let Self::Text(str) = old {
-            *self = Self::SelectedAll(str);
-        } else {
-            *self = old;
-        }
+    pub fn empty_text() -> Self {
+        Self::Text(Editor::new())
     }
-    pub fn to_unselected(&mut self) {
-        let old = std::mem::replace(self, Self::NotInput);
-        if let Self::SelectedAll(str) = old {
-            *self = Self::Text(str);
-        } else {
-            *self = old;
-        }
+    pub fn text(str: String) -> Self {
+        Self::Text(Editor::new_with_text(str))
     }
+    pub fn to_selected(&mut self) {}
+    pub fn to_unselected(&mut self) {}
     pub fn is_typing(&self) -> bool {
         !matches!(self, InputState::NotInput)
     }
     pub fn reverse(&self) -> Line<'_> {
         match self {
             InputState::NotInput => Line::from(""),
-            InputState::Text(str) => Line::from(Span::raw(str.as_str()).reversed()),
-            InputState::SelectedAll(str) => Line::from(Span::raw(str.as_str()).not_reversed()),
+            InputState::Text(editor) => Line::from(editor.to_reversed_line()),
         }
     }
     pub fn take(&mut self) -> InputState {
         match self {
-            InputState::SelectedAll(_) => {
-                std::mem::replace(self, InputState::SelectedAll(String::new()))
-            }
-            InputState::Text(_) => std::mem::replace(self, InputState::Text(String::new())),
+            InputState::Text(_) => std::mem::replace(self, InputState::Text(Editor::default())),
             InputState::NotInput => InputState::NotInput,
         }
     }

@@ -204,7 +204,7 @@ impl SpeedSum for ProgressSuit<SimpleBar> {
         sum.into()
     }
 }
-
+// TODO: IndexMap is better than implement manually
 #[derive(Encode, Decode, Debug, Clone, Default)]
 pub struct ProgressSuit<T> {
     list: Vec<Id>,

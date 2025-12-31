@@ -1,5 +1,6 @@
 pub mod app;
 pub mod confirm_widget;
+pub mod editor;
 pub mod events;
 pub mod input_widget;
 pub mod loading_widget;

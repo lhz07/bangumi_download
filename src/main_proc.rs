@@ -186,6 +186,7 @@ pub async fn refresh_download() -> Result<(), CatError> {
                 // download file
                 let ani_name = hash_ani[task_hash].to_owned();
                 println!("Downloading task {}", task.name);
+                // TODO: parallelize downloading folders
                 if let Err(error) = download_a_folder(&task.folder_id, Some(&ani_name)).await {
                     eprintln!("Can not download a task, error: {}", error);
                     error_task
@@ -195,6 +196,8 @@ pub async fn refresh_download() -> Result<(), CatError> {
                     if error_task[task_hash] > 2 {
                         break 'outer;
                     }
+                    // NOTE: we download different folder, but they are no difference on cloud,
+                    // so if a download fails, it means other download may fail, too.
                     tokio::time::sleep(Duration::from_secs(60)).await;
                     continue;
                 }
@@ -202,7 +205,10 @@ pub async fn refresh_download() -> Result<(), CatError> {
                 del_a_task::<HashAni>(&tx, task_hash).await?;
                 println!("Task {} is finished and deleted!", task.name);
             } else {
-                println!("Task {} is downloading: {}%", task.name, task.percent_done);
+                println!(
+                    "Task {} is downloading on cloud: {}%",
+                    task.name, task.percent_done
+                );
                 match task_download_time.get(task_hash) {
                     Some(instant) => {
                         if instant.elapsed().as_secs() > 1800 {

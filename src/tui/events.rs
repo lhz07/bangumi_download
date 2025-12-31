@@ -203,48 +203,67 @@ impl LEvent {
 
     /// bool: whether to exit
     pub fn handle_key_events(app: &mut App, key: KeyEvent) -> bool {
-        match key.modifiers {
-            KeyModifiers::CONTROL => {
-                if let KeyCode::Char('a') = key.code
-                    && let InputState::Text(_) = &mut app.input_state
-                {
-                    log::info!("selected!");
-                    app.input_state.to_selected();
+        // IMPORTANT: return early if there is any modifier
+        if !key.modifiers.is_empty() {
+            match key.modifiers {
+                KeyModifiers::CONTROL => {
+                    if let KeyCode::Char('a') = key.code
+                        && let InputState::Text(editor) = &mut app.input_state
+                    {
+                        log::info!("selected!");
+                        editor.select_all();
+                    }
                 }
-
-                return false;
-            }
-            KeyModifiers::ALT if app.current_screen == CurrentScreen::Filter => {
-                match key.code {
-                    KeyCode::Up => {
-                        if let Some(index) = app.filter_rule_state.selected()
-                            && index > 0
-                        {
-                            let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
-                            filter.subgroup.filter_list.swap(index, index - 1);
-                            app.filter_rule_state.select(Some(index - 1));
-                            app.socket_tx
-                                .send_msg(ClientMsg::InsertFilter(filter.clone()));
+                KeyModifiers::SHIFT => {
+                    if let InputState::Text(editor) = &mut app.input_state {
+                        match key.code {
+                            KeyCode::Left => {
+                                log::info!("shift with left arrow");
+                                editor.left_arrow_shift();
+                            }
+                            KeyCode::Right => {
+                                log::info!("shift with right arrow");
+                                editor.right_arrow_shift();
+                            }
+                            _ => (),
                         }
                     }
-                    KeyCode::Down => {
-                        if let Some(index) = app.filter_rule_state.selected() {
-                            let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
-                            let filter_list = &mut filter.subgroup.filter_list;
-                            if index + 1 < filter_list.len() {
-                                filter_list.swap(index, index + 1);
-                                app.filter_rule_state.select(Some(index + 1));
+                }
+                KeyModifiers::ALT if app.current_screen == CurrentScreen::Filter => {
+                    match key.code {
+                        KeyCode::Up => {
+                            if let Some(index) = app.filter_rule_state.selected()
+                                && index > 0
+                            {
+                                let filter =
+                                    &mut app.filters[app.filter_id_state.selected().unwrap()];
+                                filter.subgroup.filter_list.swap(index, index - 1);
+                                app.filter_rule_state.select(Some(index - 1));
                                 app.socket_tx
                                     .send_msg(ClientMsg::InsertFilter(filter.clone()));
                             }
                         }
+                        KeyCode::Down => {
+                            if let Some(index) = app.filter_rule_state.selected() {
+                                let filter =
+                                    &mut app.filters[app.filter_id_state.selected().unwrap()];
+                                let filter_list = &mut filter.subgroup.filter_list;
+                                if index + 1 < filter_list.len() {
+                                    filter_list.swap(index, index + 1);
+                                    app.filter_rule_state.select(Some(index + 1));
+                                    app.socket_tx
+                                        .send_msg(ClientMsg::InsertFilter(filter.clone()));
+                                }
+                            }
+                        }
+                        _ => (),
                     }
-                    _ => (),
                 }
-                return false;
+                _ => (),
             }
-            _ => (),
+            return false;
         }
+
         match key.code {
             KeyCode::Char(char) => {
                 match &mut app.input_state {
@@ -297,7 +316,7 @@ impl LEvent {
                                 // download a folder
                                 'd' => {
                                     check_login!(app);
-                                    app.input_state = InputState::Text(String::new());
+                                    app.input_state = InputState::empty_text();
                                     app.current_popup = Some(Popup::DownloadFolder);
                                 }
                                 // login to cloud
@@ -307,8 +326,8 @@ impl LEvent {
                                 }
                                 // add rss link
                                 'a' => {
-                                    check_login!(app);
-                                    app.input_state = InputState::Text(String::new());
+                                    // check_login!(app);
+                                    app.input_state = InputState::empty_text();
                                     app.current_popup = Some(Popup::AddRSSLink);
                                 }
                                 // delete rss link
@@ -372,14 +391,14 @@ impl LEvent {
                                     .filter_list;
                                     rules.insert(index + 1, String::new());
                                     app.filter_rule_state.select(Some(index + 1));
-                                    app.input_state = InputState::Text(String::new());
+                                    app.input_state = InputState::empty_text();
                                 }
                                 None => {
                                     if let Some(index) = app.filter_id_state.selected() {
                                         let filter = Filter::default();
                                         app.filters.insert(index + 1, filter);
                                         app.filter_id_state.select(Some(index + 1));
-                                        app.input_state = InputState::Text(String::new());
+                                        app.input_state = InputState::empty_text();
                                     }
                                 }
                             },
@@ -391,13 +410,13 @@ impl LEvent {
                                     .subgroup
                                     .filter_list;
                                     rules.insert(index, String::new());
-                                    app.input_state = InputState::Text(String::new());
+                                    app.input_state = InputState::empty_text();
                                 }
                                 None => {
                                     if let Some(index) = app.filter_id_state.selected() {
                                         let filter = Filter::default();
                                         app.filters.insert(index, filter);
-                                        app.input_state = InputState::Text(String::new());
+                                        app.input_state = InputState::empty_text();
                                     }
                                 }
                             },
@@ -408,12 +427,12 @@ impl LEvent {
                                         [app.filter_id_state.selected().unwrap()]
                                     .subgroup
                                     .filter_list[index];
-                                    app.input_state = InputState::Text(rule.clone());
+                                    app.input_state = InputState::text(rule.clone());
                                 }
                                 None => {
                                     if let Some(index) = app.filter_id_state.selected() {
                                         app.input_state =
-                                            InputState::Text(app.filters[index].id.clone());
+                                            InputState::text(app.filters[index].id.clone());
                                     }
                                 }
                             },
@@ -485,10 +504,7 @@ impl LEvent {
                         _ => (),
                     },
                     InputState::Text(str) => {
-                        str.push(char);
-                    }
-                    InputState::SelectedAll(_) => {
-                        app.input_state = InputState::Text(char.to_string());
+                        str.insert(char);
                     }
                 }
             }
@@ -523,30 +539,30 @@ impl LEvent {
                 }
             }
             KeyCode::Backspace => {
-                if let InputState::Text(str) = &mut app.input_state {
-                    str.pop();
-                } else if let InputState::SelectedAll(_) = &mut app.input_state {
-                    app.input_state = InputState::Text(String::new());
+                if let InputState::Text(editor) = &mut app.input_state {
+                    editor.backspace();
                 }
             }
             KeyCode::Enter => {
                 if let Some(popup) = &app.current_popup {
                     match popup {
                         Popup::DownloadFolder => {
-                            if let InputState::Text(str) = app.input_state.take()
-                                && !str.is_empty()
+                            if let InputState::Text(editor) = app.input_state.take()
+                                && !editor.is_empty()
                             {
-                                let msg = ClientMsg::DownloadFolder(str.into_boxed_str());
+                                let msg = ClientMsg::DownloadFolder(
+                                    editor.into_string().into_boxed_str(),
+                                );
                                 app.socket_tx.send_msg(msg);
                                 app.input_state = InputState::NotInput;
                                 app.current_popup = None;
                             }
                         }
                         Popup::AddRSSLink => {
-                            if let InputState::Text(str) = app.input_state.take()
-                                && !str.is_empty()
+                            if let InputState::Text(editor) = app.input_state.take()
+                                && !editor.is_empty()
                             {
-                                let msg = ClientMsg::AddRSS(str.into_boxed_str());
+                                let msg = ClientMsg::AddRSS(editor.into_string().into_boxed_str());
                                 app.socket_tx.send_msg(msg);
                                 app.input_state = InputState::NotInput;
                                 app.current_popup = None;
@@ -562,33 +578,35 @@ impl LEvent {
                             let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
                             let rules = &mut filter.subgroup.filter_list;
                             let old_rule = &rules[index];
-                            if let InputState::Text(str) = app.input_state.take()
-                                && !str.is_empty()
+                            if let InputState::Text(editor) = app.input_state.take()
+                                && !editor.is_empty()
                             {
-                                if !rules.contains(&str) {
-                                    rules[index] = str;
+                                let editor_str = editor.into_string();
+                                if !rules.contains(&editor_str) {
+                                    rules[index] = editor_str;
                                     app.socket_tx
                                         .send_msg(ClientMsg::InsertFilter(filter.clone()));
                                     app.input_state = InputState::NotInput;
                                 } else {
-                                    if old_rule != &str {
+                                    if old_rule != &editor_str {
                                         let noti = Notification::new(
                                             "Failed".to_string(),
                                             "This rule already exists!".to_string(),
                                         );
                                         app.notifications_queue.push_back(noti);
                                     }
-                                    app.input_state = InputState::Text(str);
+                                    app.input_state = InputState::text(editor_str);
                                 }
                             }
                         }
                         None => {
                             if let Some(index) = app.filter_id_state.selected() {
                                 let old_filter_id = &app.filters[index].id;
-                                if let InputState::Text(str) = app.input_state.take()
-                                    && !str.is_empty()
+                                if let InputState::Text(editor) = app.input_state.take()
+                                    && !editor.is_empty()
                                 {
-                                    if app.filters.iter().any(|f| f.id == str) {
+                                    let editor_str = editor.into_string();
+                                    if app.filters.iter().any(|f| f.id == editor_str) {
                                         // if old id is not empty, it means that we are editing the old id,
                                         // so we should delete the old one first
                                         if !old_filter_id.is_empty() {
@@ -597,7 +615,7 @@ impl LEvent {
                                             ));
                                         }
                                         let filter = &mut app.filters[index];
-                                        filter.id = str;
+                                        filter.id = editor_str;
                                         app.socket_tx
                                             .send_msg(ClientMsg::InsertFilter(filter.clone()));
                                         app.input_state = InputState::NotInput;
@@ -605,14 +623,14 @@ impl LEvent {
                                         // the new id is already in the list, but it may be equal to the
                                         // old one, at this situation we should do nothing. If not, it means
                                         // the id is duplicate, so send a nofication here.
-                                        if old_filter_id != &str {
+                                        if old_filter_id != &editor_str {
                                             let noti = Notification::new(
                                                 "Failed".to_string(),
                                                 "This filter already exists!".to_string(),
                                             );
                                             app.notifications_queue.push_back(noti);
                                         }
-                                        app.input_state = InputState::Text(str);
+                                        app.input_state = InputState::text(editor_str);
                                     }
                                 }
                             }
@@ -735,26 +753,26 @@ impl LEvent {
                 }
             }
             KeyCode::Right => {
-                if let InputState::SelectedAll(_) = &mut app.input_state {
-                    app.input_state.to_unselected();
+                if let InputState::Text(editor) = &mut app.input_state {
+                    editor.right_arrow();
                 } else if let CurrentScreen::Filter = app.current_screen
                     && app.filter_rule_state.selected().is_none()
                     && let Some(index) = app.filter_id_state.selected()
-                    && !app.input_state.is_typing()
                 {
                     if !app.filters[index].subgroup.filter_list.is_empty() {
                         app.filter_rule_state.select(Some(0));
                     } else {
                         app.filters[index].subgroup.filter_list.push(String::new());
-                        app.input_state = InputState::Text(String::new());
+                        app.input_state = InputState::empty_text();
                         app.filter_rule_state.select(Some(0));
                     }
                 }
             }
             KeyCode::Left => {
-                if let CurrentScreen::Filter = app.current_screen
+                if let InputState::Text(editor) = &mut app.input_state {
+                    editor.left_arrow();
+                } else if let CurrentScreen::Filter = app.current_screen
                     && app.filter_rule_state.selected().is_some()
-                    && !app.input_state.is_typing()
                 {
                     app.filter_rule_state.select(None);
                 }

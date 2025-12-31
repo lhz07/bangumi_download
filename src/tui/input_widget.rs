@@ -1,13 +1,12 @@
-use crate::tui::ui::OutterRect;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 
 pub struct InputWidget<'a> {
     title: Line<'a>,
     prompt: Text<'a>,
-    input: Text<'a>,
+    input: Line<'a>,
     input_lines: u16,
 }
 
@@ -15,7 +14,7 @@ impl<'a> InputWidget<'a> {
     pub fn new<T1, T2, L>(title: L, prompt: T1, input: T2, input_lines: u16) -> Self
     where
         T1: Into<Text<'a>>,
-        T2: Into<Text<'a>>,
+        T2: Into<Line<'a>>,
         L: Into<Line<'a>>,
     {
         Self {
@@ -49,9 +48,8 @@ impl Widget for InputWidget<'_> {
         .split(area);
         self.prompt.render(popup_layout[0], buf);
         let input_block = Block::bordered();
-        let input_para = Paragraph::new(self.input)
-            .block(input_block)
-            .wrap(Wrap { trim: true });
+        // log::info!("{:?}", self.input);
+        let input_para = Paragraph::new(self.input).block(input_block);
         input_para.render(popup_layout[1], buf);
         let line = Block::default().borders(Borders::BOTTOM);
         line.render(popup_layout[3], buf);
