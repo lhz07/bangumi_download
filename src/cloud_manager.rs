@@ -1,7 +1,7 @@
 use crate::cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link};
 use crate::config_manager::{CONFIG, SafeSend};
 use crate::drop_guard::DropGuard;
-use crate::errors::{CatError, CloudError, DownloadError};
+use crate::errors::{CatError, CloudError, DownloadError, RequestError};
 use crate::id::Id;
 use crate::login_with_qrcode::login_with_qrcode;
 use crate::socket_utils::{DownloadMsg, DownloadState, ServerMsg};
@@ -10,10 +10,10 @@ use crate::{
 };
 use futures::future::join_all;
 use regex::Regex;
-use reqwest::Client;
 use reqwest::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue,
 };
+use reqwest::{Client, StatusCode};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -147,6 +147,13 @@ async fn download_chunk(
 ) -> Result<(), DownloadError> {
     let range_header = format!("bytes={}-{}", start, end);
     let mut response = client.get(url).header("Range", range_header).send().await?;
+    // check the status code
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return Err(DownloadError::Request(RequestError::Status(format!(
+            "expected 206, but received {}",
+            response.status().as_str()
+        ))));
+    }
     let mut current: u64 = start;
     while let Some(chunk) = response.chunk().await? {
         file.write_all_at(&chunk, current)?;
@@ -186,13 +193,17 @@ pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<
         "path's parent folder is missing".to_string(),
     ))?)
     .await?;
+    // if the file exists, delete it first
+    if sfs::exists(path)? {
+        sfs::remove_file(path)?;
+    }
     let file = sfs::File::create(path)?;
     let mut futs = Vec::new();
     futs.push(download_chunk(
         url,
         client,
         current,
-        current + average,
+        (current + average).saturating_sub(1),
         &file,
         id,
     ));
@@ -201,7 +212,7 @@ pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<
         url,
         client,
         current,
-        content_length,
+        content_length.saturating_sub(1),
         &file,
         id,
     ));
@@ -209,6 +220,7 @@ pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<
     for i in results {
         i?;
     }
+    file.sync_all()?;
     let msg = ServerMsg::Download(DownloadMsg {
         id,
         state: DownloadState::Finished,

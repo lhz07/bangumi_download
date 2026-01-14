@@ -423,6 +423,32 @@ impl SocketListener {
                                 "Can not add RSS link".to_string(),
                                 e.to_string(),
                             ))));
+                        } else {
+                            BROADCAST_TX.send_msg(ServerMsg::Ok(
+                                "Successfully added a new RSS link"
+                                    .to_string()
+                                    .into_boxed_str(),
+                            ));
+                            let config = CONFIG.load();
+                            let last_updates = &config.bangumi;
+                            let animes = config
+                                .rss_links
+                                .iter()
+                                .map(|(id, (name, rss_link))| {
+                                    let latest = match last_updates.get(id) {
+                                        Some(str) => str.clone(),
+                                        None => Bangumi::default(),
+                                    };
+                                    Anime {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                        rss_link: rss_link.clone(),
+                                        last_update: latest.last_update,
+                                        latest_episode: latest.latest_episode,
+                                    }
+                                })
+                                .collect::<Box<_>>();
+                            BROADCAST_TX.send_msg(ServerMsg::RSSData(animes));
                         }
                     }
                     Err(e) => {

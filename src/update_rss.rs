@@ -323,7 +323,9 @@ pub async fn rss_receive(
         }
         Ok(())
     };
+    let title;
     if !old_bangumi_dict.contains_key(&bangumi_id) {
+        // add a new bangumi
         magnet_links
             .extend(get_all_episode_magnet_links(&ani_id, &sub_id, &old_config.filter).await?);
         let insert_id = bangumi_id.clone();
@@ -336,7 +338,7 @@ pub async fn rss_receive(
             .await
             .ok_or(CatError::Parse("can not found latest item!".to_string()))?;
         update_subgroup_name(Some(sub_name.clone())).await?;
-        let title = format!("[{sub_name}] {bangumi_name}");
+        title = format!("[{sub_name}] {bangumi_name}");
         let insert_title = title.clone();
         let insert_url = url.to_string();
         let cmd = Box::new(|config: &mut Config| {
@@ -349,6 +351,7 @@ pub async fn rss_receive(
         tx.send_msg(msg);
         notify.notified().await;
     } else if latest_update <= old_bangumi_dict[&bangumi_id].last_update {
+        // no update
         update_subgroup_name(None).await?;
         let title = &old_config.rss_links[&bangumi_id].0;
         println!("{title} 无更新, 上次更新: {latest_update}");
@@ -356,6 +359,7 @@ pub async fn rss_receive(
         // no need to do anything here, return now!
         return Ok(());
     } else {
+        // update an old bangumi
         update_subgroup_name(None).await?;
         let mut index = 0;
         for (i, item) in items.iter().enumerate() {
@@ -375,8 +379,8 @@ pub async fn rss_receive(
         let filter = &old_config.filter;
         let item_links = filter_episode(items_iter, filter, &sub_id);
         magnet_links = get_all_magnet(item_links).await?;
+        title = old_config.rss_links[&bangumi_id].0.clone();
     }
-    let title = old_config.rss_links[&bangumi_id].0.clone();
     if let Some(magnets) = old_config.magnets.get(&title) {
         magnet_links.append(&mut magnets.to_vec());
     }

@@ -76,6 +76,7 @@ impl LEvent {
                             }
                             DownloadState::Failed => {
                                 log::trace!("received a socket download failed msg, {}", msg.id);
+                                // TODO: save and show all failed tasks
                                 app.downloading_state.progress_suit.remove(msg.id);
                             }
                         },
@@ -203,65 +204,65 @@ impl LEvent {
 
     /// bool: whether to exit
     pub fn handle_key_events(app: &mut App, key: KeyEvent) -> bool {
-        // IMPORTANT: return early if there is any modifier
-        if !key.modifiers.is_empty() {
-            match key.modifiers {
-                KeyModifiers::CONTROL => {
-                    if let KeyCode::Char('a') = key.code
-                        && let InputState::Text(editor) = &mut app.input_state
-                    {
-                        log::info!("selected!");
-                        editor.select_all();
-                    }
+        // IMPORTANT: return early if there matched any modifier
+        match key.modifiers {
+            KeyModifiers::CONTROL => {
+                if let KeyCode::Char('a') = key.code
+                    && let InputState::Text(editor) = &mut app.input_state
+                {
+                    log::info!("selected!");
+                    editor.select_all();
+                    return false;
                 }
-                KeyModifiers::SHIFT => {
-                    if let InputState::Text(editor) = &mut app.input_state {
-                        match key.code {
-                            KeyCode::Left => {
-                                log::info!("shift with left arrow");
-                                editor.left_arrow_shift();
-                            }
-                            KeyCode::Right => {
-                                log::info!("shift with right arrow");
-                                editor.right_arrow_shift();
-                            }
-                            _ => (),
-                        }
-                    }
-                }
-                KeyModifiers::ALT if app.current_screen == CurrentScreen::Filter => {
+            }
+            // NOTICE: when paste 'A' or press Shift + 'a', terminal will receive
+            // Shift + 'A', we need to ignore the Shift.
+            KeyModifiers::SHIFT => {
+                if let InputState::Text(editor) = &mut app.input_state {
                     match key.code {
-                        KeyCode::Up => {
-                            if let Some(index) = app.filter_rule_state.selected()
-                                && index > 0
-                            {
-                                let filter =
-                                    &mut app.filters[app.filter_id_state.selected().unwrap()];
-                                filter.subgroup.filter_list.swap(index, index - 1);
-                                app.filter_rule_state.select(Some(index - 1));
-                                app.socket_tx
-                                    .send_msg(ClientMsg::InsertFilter(filter.clone()));
-                            }
+                        KeyCode::Left => {
+                            log::info!("shift with left arrow");
+                            editor.left_arrow_shift();
+                            return false;
                         }
-                        KeyCode::Down => {
-                            if let Some(index) = app.filter_rule_state.selected() {
-                                let filter =
-                                    &mut app.filters[app.filter_id_state.selected().unwrap()];
-                                let filter_list = &mut filter.subgroup.filter_list;
-                                if index + 1 < filter_list.len() {
-                                    filter_list.swap(index, index + 1);
-                                    app.filter_rule_state.select(Some(index + 1));
-                                    app.socket_tx
-                                        .send_msg(ClientMsg::InsertFilter(filter.clone()));
-                                }
-                            }
+                        KeyCode::Right => {
+                            log::info!("shift with right arrow");
+                            editor.right_arrow_shift();
+                            return false;
                         }
                         _ => (),
                     }
                 }
-                _ => (),
             }
-            return false;
+            KeyModifiers::ALT if app.current_screen == CurrentScreen::Filter => match key.code {
+                KeyCode::Up => {
+                    if let Some(index) = app.filter_rule_state.selected()
+                        && index > 0
+                    {
+                        let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
+                        filter.subgroup.filter_list.swap(index, index - 1);
+                        app.filter_rule_state.select(Some(index - 1));
+                        app.socket_tx
+                            .send_msg(ClientMsg::InsertFilter(filter.clone()));
+                        return false;
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(index) = app.filter_rule_state.selected() {
+                        let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
+                        let filter_list = &mut filter.subgroup.filter_list;
+                        if index + 1 < filter_list.len() {
+                            filter_list.swap(index, index + 1);
+                            app.filter_rule_state.select(Some(index + 1));
+                            app.socket_tx
+                                .send_msg(ClientMsg::InsertFilter(filter.clone()));
+                            return false;
+                        }
+                    }
+                }
+                _ => (),
+            },
+            _ => (),
         }
 
         match key.code {

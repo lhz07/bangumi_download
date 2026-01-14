@@ -295,8 +295,8 @@ impl Editor {
         }
     }
     pub fn insert(&mut self, ch: char) {
-        log::info!("insert: {}", ch);
-        log::info!("current str: {:?}", self.str);
+        // log::info!("editor: insert: {}", ch);
+        // log::info!("current str: {:?}", self.str);
         match self.cursor {
             Cursor::Normal {
                 index: ref mut cursor_index,

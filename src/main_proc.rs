@@ -325,15 +325,15 @@ pub async fn restart_refresh_download_slow() -> Result<(), CatError> {
 
 pub async fn refresh_download_slow() -> Result<(), CatError> {
     println!("refresh download slow is started");
-    let wait_time = Duration::from_secs(3600);
+    let wait_time = Duration::from_mins(60);
     let mut error_task = HashMap::new();
     'outer: loop {
         let hash_ani = {
             let config = CONFIG.load();
-            if config.hash_ani.is_empty() {
+            if config.hash_ani_slow.is_empty() {
                 break;
             } else {
-                &config.clone().hash_ani
+                &config.clone().hash_ani_slow
             }
         };
         let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
