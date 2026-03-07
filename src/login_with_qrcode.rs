@@ -1,6 +1,6 @@
-use crate::BROADCAST_TX;
 use crate::config_manager::SafeSend;
 use crate::errors::CloudError;
+use crate::{BROADCAST_TX, CLIENT_DOWNLOAD};
 use serde::{Deserialize, Serialize};
 
 // const DEVICE: [&str; 11] = ["AppEnum", "web", "android", "ios", "linux", "mac", "windows", "tv", "alipaymini", "wechatmini", "qandroid"];
@@ -87,7 +87,7 @@ async fn get_qrcode_status(client: &reqwest::Client, query: &Query) -> Result<St
 }
 
 pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
-    let client = reqwest::Client::new();
+    let client = CLIENT_DOWNLOAD.clone();
     let qrcode_token = get_qrcode_token(&client).await?;
     let Token {
         qrcode,
@@ -174,6 +174,7 @@ pub async fn login_with_qrcode(app: &str) -> Result<String, CloudError> {
             }
         }
     }
+    println!("try to get cookies");
     let cookies = post_qrcode_result(&client, &uid, app).await?;
     let cookie_list = vec![
         ("UID", cookies.UID),

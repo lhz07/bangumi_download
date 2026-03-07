@@ -1,7 +1,7 @@
 use crate::cloud::download::{DownloadInfo, FileDownloadUrl, get_download_link};
 use crate::config_manager::{CONFIG, SafeSend};
 use crate::drop_guard::DropGuard;
-use crate::errors::{CatError, CloudError, DownloadError, RequestError};
+use crate::errors::{CatError, CloudError, DownloadError};
 use crate::id::Id;
 use crate::login_with_qrcode::login_with_qrcode;
 use crate::socket_utils::{DownloadMsg, DownloadState, ServerMsg};
@@ -10,16 +10,15 @@ use crate::{
 };
 use futures::future::join_all;
 use regex::Regex;
+use reqwest::Client;
 use reqwest::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap, HeaderValue,
 };
-use reqwest::{Client, StatusCode};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs as sfs;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -77,6 +76,9 @@ pub struct FileInfo {
     pub file_id: Option<String>,
     #[serde(rename = "n")]
     pub name: String,
+    /// only file has hash
+    #[serde(rename = "sha")]
+    pub sha1: Option<String>,
     #[serde(rename = "s")]
     pub size: Option<u64>,
     #[serde(rename = "pc")]
@@ -124,7 +126,7 @@ pub async fn get_cloud_cookies() -> Result<String, CatError> {
             eprintln!("waiting for retry...");
         }
         try_times.store(true, std::sync::atomic::Ordering::Relaxed);
-        login_with_qrcode("alipaymini").await.inspect_err(|e| {
+        login_with_qrcode("tv").await.inspect_err(|e| {
             eprintln!("Login with qrcode failed, error: {e}");
         })
     })
@@ -137,38 +139,47 @@ pub async fn get_cloud_cookies() -> Result<String, CatError> {
     }
 }
 
-async fn download_chunk(
+/// **NOTE:**
+/// We may need to reconsider multi-threaded (parallel range) downloads for a single file.
+/// Some CDN or object storage providers appear to enforce per-file session limits
+/// or anti-abuse policies that reject concurrent Range requests.
+///
+/// In certain cases, when one range request completes, the CDN may treat the
+/// download session as finished and actively reject the remaining in-flight
+/// ranges with HTTP 403 responses.
+///
+/// Since this behavior depends on CDN implementation details and cannot be
+/// reliably detected or controlled client-side, it might be safer to fall back
+/// to a single-connection download instead of parallel chunk downloads for
+/// individual files.
+///
+/// We may add resume support later...
+async fn download_single(
     url: &str,
     client: &Client,
-    start: u64,
-    end: u64,
-    file: &sfs::File,
+    file: &mut sfs::File,
     id: Id,
 ) -> Result<(), DownloadError> {
-    let range_header = format!("bytes={}-{}", start, end);
-    let mut response = client.get(url).header("Range", range_header).send().await?;
-    // check the status code
-    if response.status() != StatusCode::PARTIAL_CONTENT {
-        return Err(DownloadError::Request(RequestError::Status(format!(
-            "expected 206, but received {}",
-            response.status().as_str()
-        ))));
-    }
-    let mut current: u64 = start;
+    use std::io::Write;
+    let mut response = client.get(url).send().await?;
     while let Some(chunk) = response.chunk().await? {
-        file.write_all_at(&chunk, current)?;
-        let delta = chunk.len() as u64;
+        file.write_all(&chunk)?;
         let msg = ServerMsg::Download(DownloadMsg {
             id,
-            state: DownloadState::Downloading(delta),
+            state: DownloadState::Downloading(chunk.len() as u64),
         });
         BROADCAST_TX.send_msg(msg);
-        current += delta;
     }
     Ok(())
 }
 
-pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<(), DownloadError> {
+pub async fn download_file(
+    url: &str,
+    path: &Path,
+    id: Id,
+    size: u64,
+    mut hash: String,
+) -> Result<(), DownloadError> {
     let client = &CLIENT_DOWNLOAD;
     let response = client.head(url).send().await?;
     let content_length = response
@@ -184,11 +195,6 @@ pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<
             "inconsistent content length".to_string(),
         ));
     }
-    let average = content_length / 2;
-    // ProgressStyle::default_bar()
-    //     .template("{wide_bar} {bytes} / {total_bytes} ({binary_bytes_per_sec}  eta: {eta})")
-
-    let mut current: u64 = 0;
     fs::create_dir_all(path.parent().ok_or(DownloadError::Path(
         "path's parent folder is missing".to_string(),
     ))?)
@@ -197,30 +203,22 @@ pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<
     if sfs::exists(path)? {
         sfs::remove_file(path)?;
     }
-    let file = sfs::File::create(path)?;
-    let mut futs = Vec::new();
-    futs.push(download_chunk(
-        url,
-        client,
-        current,
-        (current + average).saturating_sub(1),
-        &file,
-        id,
-    ));
-    current += average;
-    futs.push(download_chunk(
-        url,
-        client,
-        current,
-        content_length.saturating_sub(1),
-        &file,
-        id,
-    ));
-    let results = join_all(futs).await;
-    for i in results {
-        i?;
+    let mut file = sfs::File::create(path)?;
+    download_single(url, client, &mut file, id).await?;
+    let sha1 = sha1_of_file(path)?;
+    // `sha1` is upper case, ensure `hash` is upper case, too.
+    hash.make_ascii_uppercase();
+    if sha1 != hash {
+        return Err(DownloadError::Hash {
+            expected: hash,
+            found: sha1,
+        });
     }
+    // sync_all() is slow but ensures data is fully flushed to disk.
+    // It is only used together with hash verification to provide
+    // stronger integrity guarantees when needed.
     file.sync_all()?;
+
     let msg = ServerMsg::Download(DownloadMsg {
         id,
         state: DownloadState::Finished,
@@ -228,6 +226,26 @@ pub async fn download_file(url: &str, path: &Path, id: Id, size: u64) -> Result<
     BROADCAST_TX.send_msg(msg);
     println!("{:?} finished!", path);
     Ok(())
+}
+
+pub fn sha1_of_file(path: &Path) -> std::io::Result<String> {
+    use sha1::{Digest, Sha1};
+    use std::io::Read;
+
+    let mut file = sfs::File::open(path)?;
+    let mut hasher = Sha1::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    let result = hasher.finalize();
+    Ok(format!("{:X}", result))
 }
 
 pub async fn cloud_download(urls: &[String]) -> Result<Vec<String>, CloudError> {
@@ -536,6 +554,8 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
         path.push(file.path);
         path.push(&file_name);
         let sema = sema.clone();
+        // require the permission first, to avoid holding the
+        // download url for a long time
         let permit = sema
             .acquire_owned()
             .await
@@ -545,7 +565,14 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
             let id = *id_guard.inner();
             (
                 id_guard,
-                download_file(&url, &path, id, file.info.size.unwrap()).await,
+                download_file(
+                    &url,
+                    &path,
+                    id,
+                    file.info.size.unwrap(),
+                    file.info.sha1.unwrap(),
+                )
+                .await,
             )
         }));
     }

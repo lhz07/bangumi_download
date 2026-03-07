@@ -72,7 +72,7 @@ impl InputState {
     pub fn reverse(&self) -> Line<'_> {
         match self {
             InputState::NotInput => Line::from(""),
-            InputState::Text(editor) => Line::from(editor.to_reversed_line()),
+            InputState::Text(editor) => editor.to_reversed_line(),
         }
     }
     pub fn take(&mut self) -> InputState {

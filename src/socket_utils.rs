@@ -7,9 +7,7 @@ use crate::main_proc::{
 };
 use crate::recovery_signal::{RECOVERY_SIGNAL, Waiting};
 use crate::time_stamp::TimeStamp;
-use crate::tui::progress_bar::{
-    BasicBar, Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar,
-};
+use crate::tui::progress_bar::{Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar};
 use crate::update_rss::{check_rss_link, rss_receive, start_rss_receive};
 use crate::{
     BROADCAST_TX, CLIENT_COUNT, CLIENT_WITH_RETRY, END_NOTIFY, LOGIN_STATUS, RSS_DATA_PERMIT, TX,
@@ -249,15 +247,15 @@ impl SocketListener {
                 DownloadState::Downloading(delta) => {
                     if let Some(bar) = self.state.get_bar_mut(download_msg.id) {
                         bar.inc(delta);
-                        if bar.is_finished() {
-                            println!("remove the bar as it is finished");
-                            self.state.remove(download_msg.id);
-                            let msg = ServerMsg::Download(DownloadMsg {
-                                id: download_msg.id,
-                                state: DownloadState::Finished,
-                            });
-                            return Some(msg);
-                        }
+                        // if bar.is_finished() {
+                        //     println!("remove the bar as it is finished");
+                        //     self.state.remove(download_msg.id);
+                        //     let msg = ServerMsg::Download(DownloadMsg {
+                        //         id: download_msg.id,
+                        //         state: DownloadState::Finished,
+                        //     });
+                        //     return Some(msg);
+                        // }
                     }
                     None
                 }
@@ -607,7 +605,7 @@ impl SocketListener {
                 }
                 // send the unsend msg
                 _ = deadline.wait() => {
-                    println!("deadline reached!");
+                    // println!("deadline reached!");
                     if !self.state.is_empty() && unhandle_latest{
                         // send state
                         let state = self.state.state().into_boxed_slice();

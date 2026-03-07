@@ -3,6 +3,10 @@ use ratatui::style::{Color as RColor, Stylize};
 use ratatui::widgets::{Block, Clear, Paragraph, StatefulWidget, Widget, Wrap};
 use std::ops::{Add, Mul, Sub};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::config_manager::SafeSend;
+use crate::tui::animator::AniCmd;
 
 pub struct Notification {
     title: String,
@@ -11,12 +15,14 @@ pub struct Notification {
     duration: Duration,
     fade_duration: Duration,
     should_disappear: bool,
+    animator_tx: UnboundedSender<AniCmd>,
 }
 
 pub struct NotificationWidget;
 
 impl Notification {
-    pub fn new(title: String, content: String) -> Self {
+    pub fn new(title: String, content: String, animator_tx: UnboundedSender<AniCmd>) -> Self {
+        animator_tx.send_msg(AniCmd::Start);
         Self {
             title,
             content,
@@ -24,6 +30,7 @@ impl Notification {
             duration: Duration::from_secs(5),
             fade_duration: Duration::from_secs(1),
             should_disappear: false,
+            animator_tx,
         }
     }
     pub fn duration(mut self, duration: Duration) -> Self {
@@ -35,6 +42,13 @@ impl Notification {
         self.should_disappear
     }
 }
+
+impl Drop for Notification {
+    fn drop(&mut self) {
+        self.animator_tx.send_msg(AniCmd::Stop);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Color(u8, u8, u8);
 struct TColor(i16, i16, i16);

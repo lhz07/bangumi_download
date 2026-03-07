@@ -57,6 +57,8 @@ pub enum DownloadError {
     Path(String),
     #[error("Content Length error: {0}")]
     ContentLength(String),
+    #[error("Hash verify failed, expected: {expected}, found: {found}")]
+    Hash { expected: String, found: String },
 }
 
 #[derive(Error, Debug)]

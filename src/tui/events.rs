@@ -15,8 +15,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 macro_rules! check_login {
     ($app:expr) => {
         if !$app.is_logged_in {
-            let noti = Notification::new("Failed".to_string(), "Please login first!".to_string())
-                .duration(Duration::from_secs(2));
+            let noti = Notification::new(
+                "Failed".to_string(),
+                "Please login first!".to_string(),
+                $app.animator_tx.clone(),
+            )
+            .duration(Duration::from_secs(2));
             $app.notifications_queue.push_back(noti);
             return false;
         }
@@ -147,25 +151,40 @@ impl LEvent {
                         }
                         ServerMsg::Ok(info) => {
                             log::info!("{}", info);
-                            let noti = Notification::new("Success".to_string(), info.into_string());
+                            let noti = Notification::new(
+                                "Success".to_string(),
+                                info.into_string(),
+                                app.animator_tx.clone(),
+                            );
                             app.notifications_queue.push_back(noti);
                         }
                         ServerMsg::Error(ptr) => {
                             let (info, error) = *ptr;
                             log::error!("{}", error);
-                            let noti = Notification::new("Failed".to_string(), info);
+                            let noti = Notification::new(
+                                "Failed".to_string(),
+                                info,
+                                app.animator_tx.clone(),
+                            );
                             app.notifications_queue.push_back(noti);
                         }
                         ServerMsg::Info(info) => {
                             log::info!("{}", info);
-                            let noti = Notification::new("Info".to_string(), info.into_string());
+                            let noti = Notification::new(
+                                "Info".to_string(),
+                                info.into_string(),
+                                app.animator_tx.clone(),
+                            );
                             app.notifications_queue.push_back(noti);
                         }
                         ServerMsg::LoginState(state) => {
                             log::info!("Login state: {}", state);
-                            let noti =
-                                Notification::new("Login State".to_string(), state.into_string())
-                                    .duration(Duration::from_secs(2));
+                            let noti = Notification::new(
+                                "Login State".to_string(),
+                                state.into_string(),
+                                app.animator_tx.clone(),
+                            )
+                            .duration(Duration::from_secs(2));
                             app.notifications_queue.push_back(noti);
                         }
                         ServerMsg::IsLogin(login) => {
@@ -179,7 +198,7 @@ impl LEvent {
                             app.qrcode_url = Ok(url);
                         }
                         ServerMsg::Loading => {
-                            app.loading_state = Some(LoadingState::new());
+                            app.loading_state = Some(LoadingState::new(app.animator_tx.clone()));
                         }
                         ServerMsg::SubFilter(filters) => {
                             app.filter_id_state.select(None);
@@ -196,6 +215,7 @@ impl LEvent {
                             return Ok(());
                         }
                     }
+                    ui::render(app)?;
                 }
             }
         }
@@ -311,7 +331,7 @@ impl LEvent {
                                 'r' => {
                                     check_login!(app);
                                     app.socket_tx.send_msg(ClientMsg::RefreshRSS);
-                                    let loading_state = LoadingState::new();
+                                    let loading_state = LoadingState::new(app.animator_tx.clone());
                                     app.loading_state = Some(loading_state);
                                 }
                                 // download a folder
@@ -512,8 +532,19 @@ impl LEvent {
             KeyCode::Esc => {
                 // assume the popup takes the keyboard focus and we don't want to restore it
                 if app.current_popup.is_some() {
-                    app.current_popup = None;
-                    app.input_state = InputState::NotInput;
+                    match &mut app.input_state {
+                        InputState::NotInput => {
+                            app.current_popup = None;
+                        }
+                        InputState::Text(editor) => {
+                            if editor.has_selection() {
+                                editor.cancel_selection();
+                            } else {
+                                app.current_popup = None;
+                                app.input_state = InputState::NotInput;
+                            }
+                        }
+                    }
                 } else if app.current_screen == CurrentScreen::Filter && app.input_state.is_typing()
                 {
                     app.input_state = InputState::NotInput;
@@ -593,6 +624,7 @@ impl LEvent {
                                         let noti = Notification::new(
                                             "Failed".to_string(),
                                             "This rule already exists!".to_string(),
+                                            app.animator_tx.clone(),
                                         );
                                         app.notifications_queue.push_back(noti);
                                     }
@@ -628,6 +660,7 @@ impl LEvent {
                                             let noti = Notification::new(
                                                 "Failed".to_string(),
                                                 "This filter already exists!".to_string(),
+                                                app.animator_tx.clone(),
                                             );
                                             app.notifications_queue.push_back(noti);
                                         }

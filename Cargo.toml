@@ -30,13 +30,15 @@ thiserror = "2.0.12"
 ratatui = "0.30.0"
 bincode = "2.0.1"
 log = "0.4.27"
-# tui-logger = "0.17.4"
+tui-logger = "0.18.1"
 url = "2.5.4"
 chrono = { version = "0.4.42", features = ["serde"] }
 strum = { version = "0.27.2", features = ["derive"] }
 unicode-segmentation = "1.12.0"
 textwrap = "0.16.2"
-tui-logger = { git = "https://github.com/lhz07/tui-logger.git", branch = "patch-dep" }
+# tui-logger = { git = "https://github.com/lhz07/tui-logger.git", branch = "patch-dep" }
+sha1 = "0.10.6"
+crossterm = { version = "0.29.0", features = ["event-stream"], default-features = false }
 
 [profile.release]
 strip = true

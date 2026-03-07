@@ -2,6 +2,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::{StatefulWidget, Widget};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::config_manager::SafeSend;
+use crate::tui::animator::AniCmd;
 
 pub struct LoadingWidget;
 
@@ -10,17 +14,14 @@ pub struct LoadingState {
     interval: Duration,
     instant: Instant,
     state: u8,
-}
-
-impl Default for LoadingState {
-    fn default() -> Self {
-        Self::new()
-    }
+    animator_tx: UnboundedSender<AniCmd>,
 }
 
 impl LoadingState {
-    pub fn new() -> Self {
+    pub fn new(animator_tx: UnboundedSender<AniCmd>) -> Self {
+        animator_tx.send_msg(AniCmd::Start);
         Self {
+            animator_tx,
             interval: Duration::from_millis(50),
             instant: Instant::now(),
             state: 0,
@@ -41,6 +42,12 @@ impl LoadingState {
             self.instant = Instant::now();
         }
         FRAMES[self.state as usize]
+    }
+}
+
+impl Drop for LoadingState {
+    fn drop(&mut self) {
+        self.animator_tx.send_msg(AniCmd::Stop);
     }
 }
 

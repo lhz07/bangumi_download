@@ -3,19 +3,19 @@ use crate::recovery_signal::Waiting;
 use crate::socket_utils::{
     Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, Filter, SocketPath,
 };
+use crate::tui::animator::{AniCmd, Animator};
 use crate::tui::events::LEvent;
 use crate::tui::loading_widget::LoadingState;
 use crate::tui::notification_widget::Notification;
 use crate::tui::progress_bar::{ProgressSuit, SimpleBar};
 use crate::tui::ui::{CurrentScreen, InputState, Popup};
 use crate::{END_NOTIFY, READY_TO_EXIT};
+use futures::StreamExt;
 use futures::future::join;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self};
 use ratatui::widgets::{ListState as TuiListState, ScrollbarState};
 use std::collections::VecDeque;
 use std::io;
-use std::time::Duration;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -84,6 +84,7 @@ pub struct App {
     pub(crate) is_logged_in: bool,
     pub(crate) filters: Vec<Filter>,
     pub(crate) waiting_state: Waiting,
+    pub(crate) animator_tx: UnboundedSender<AniCmd>,
 }
 
 impl App {
@@ -107,6 +108,10 @@ impl App {
             socket_rx,
             socket_path,
         ));
+        let (mut animator, animator_tx) = Animator::new(event_tx.clone());
+        tokio::spawn(async move {
+            animator.run().await;
+        });
         let ui_events_handle = tokio::spawn(Self::receive_ui_events(event_tx));
         let handles = Handles {
             socket_handle,
@@ -132,24 +137,33 @@ impl App {
             is_logged_in: false,
             filters: Vec::new(),
             waiting_state: Waiting::default(),
+            animator_tx,
         };
         app.socket_tx.send_msg(ClientMsg::SyncQuery);
         app.socket_tx.send_msg(ClientMsg::GetWaitingState);
         (app, event_rx, handles)
     }
     pub async fn receive_ui_events(tx: UnboundedSender<LEvent>) -> io::Result<()> {
-        let wait_poll = async || event::poll(Duration::from_millis(50));
+        if let Err(e) = tx.send(LEvent::Render) {
+            let err =
+                format!("It seems that the Receiver of LEvent is closed too early, error: {e}");
+            log::error!("{err}");
+            return Err(io::Error::other(err));
+        }
+        use crossterm::event::EventStream;
+        let mut stream = EventStream::new();
         loop {
             select! {
-                poll = wait_poll() => {
-                    if poll? {
-                        let event = LEvent::Tui(event::read()?);
+                poll = stream.next() => {
+                    if let Some(event) = poll{
+                        let event = LEvent::Tui(event?);
                         tx.send_msg(event);
                     }
-                    let event = LEvent::Render;
-                    if let Err(e) = tx.send(event) {
-                        log::error!("It seems that the Receiver of LEvent is closed too early, error: {e}");
-                        break;
+                    if let Err(e) = tx.send(LEvent::Render) {
+                        let err =
+                            format!("It seems that the Receiver of LEvent is closed too early, error: {e}");
+                        log::error!("{err}");
+                        return Err(io::Error::other(err));
                     }
                 }
                 _ = END_NOTIFY.notified() => {

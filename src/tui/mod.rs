@@ -1,3 +1,4 @@
+pub mod animator;
 pub mod app;
 pub mod confirm_widget;
 pub mod editor;

@@ -108,6 +108,7 @@ dependencies = [
  "base64",
  "bincode",
  "chrono",
+ "crossterm",
  "ctrlc",
  "futures",
  "log",
@@ -125,6 +126,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha1",
  "strum",
  "textwrap",
  "thiserror 2.0.17",
@@ -330,6 +332,7 @@ dependencies = [
  "crossterm_winapi",
  "derive_more 2.1.1",
  "document-features",
+ "futures-core",
  "mio",
  "parking_lot 0.12.5",
  "rustix",
@@ -2338,6 +2341,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2871,8 +2885,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui-logger"
-version = "0.17.4"
-source = "git+https://github.com/lhz07/tui-logger.git?branch=patch-dep#0ec0f7664700f20ad4f0313fb901887e002ba0ed"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9384df20a5244a6ab204bc4b6959b41f37f0ee7b5e0f2feb7a8a78f58e684d06"
 dependencies = [
  "chrono",
  "env_filter",

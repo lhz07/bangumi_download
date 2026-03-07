@@ -74,7 +74,7 @@ impl RealLen for str {
     fn grapheme_index_str(&self, g_index: usize) -> (usize, &str) {
         self.grapheme_indices(true)
             .nth(g_index)
-            .unwrap_or_else(|| (self.len(), ""))
+            .unwrap_or((self.len(), ""))
     }
     /// -> (byte_index: usize, is_over_end: bool)
     fn grapheme_index_end(&self, g_index: usize) -> (usize, bool) {
@@ -124,12 +124,30 @@ impl Editor {
     pub fn as_str(&self) -> &str {
         &self.str
     }
+    pub fn has_selection(&self) -> bool {
+        matches!(self.cursor, Cursor::Select { .. })
+    }
+    pub fn cancel_selection(&mut self) {
+        if let Cursor::Select {
+            begin,
+            end,
+            direction,
+        } = self.cursor
+        {
+            match direction {
+                Direction::Left => self.cursor = Cursor::Normal { index: begin },
+                Direction::Right => {
+                    self.cursor = Cursor::Normal { index: end };
+                }
+            }
+        }
+    }
 
     pub fn right_arrow(&mut self) {
         match self.cursor {
             // move cursor normally
             Cursor::Normal { ref mut index } => {
-                if *index + 1 <= self.str.real_len() {
+                if *index < self.str.real_len() {
                     self.insert_index.take();
                     *index += 1
                 }
@@ -137,7 +155,7 @@ impl Editor {
             // cancel the selection, and move cursor to the end of the selection
             // if the selection is begin == end, move the cursor toward right
             Cursor::Select { begin, mut end, .. } => {
-                if begin == end && end + 1 <= self.str.real_len() {
+                if begin == end && end < self.str.real_len() {
                     end += 1;
                 }
                 self.cursor = Cursor::Normal { index: end };
@@ -179,7 +197,7 @@ impl Editor {
         match self.cursor {
             // change to select mode, and move right
             Cursor::Normal { index } => {
-                if index + 1 <= self.str.real_len() {
+                if index < self.str.real_len() {
                     self.insert_index.take();
                     self.cursor = Cursor::Select {
                         begin: index,
@@ -196,13 +214,13 @@ impl Editor {
                 match direction {
                     // move begin toward right
                     Direction::Left => {
-                        if *begin + 1 <= self.str.real_len() {
+                        if *begin < self.str.real_len() {
                             *begin += 1;
                         }
                     }
                     // move end toward right
                     Direction::Right => {
-                        if *end + 1 <= self.str.real_len() {
+                        if *end < self.str.real_len() {
                             *end += 1;
                         }
                     }
@@ -277,8 +295,8 @@ impl Editor {
                 let mut graphs = self.str.grapheme_indices(true);
                 let (index_before_cursor, _) = graphs
                     .nth(*cursor_index - 1)
-                    .unwrap_or_else(|| (self.str.len(), ""));
-                let (index_after_cursor, _) = graphs.next().unwrap_or_else(|| (self.str.len(), ""));
+                    .unwrap_or((self.str.len(), ""));
+                let (index_after_cursor, _) = graphs.next().unwrap_or((self.str.len(), ""));
                 self.str.drain(index_before_cursor..index_after_cursor);
                 *cursor_index -= 1;
             }
@@ -337,8 +355,13 @@ impl Editor {
                 let (begin_byte_index, _) = self.str.grapheme_index_str(begin);
                 let (end_byte_index, _) = self.str.grapheme_index_str(end);
                 let new_str = ch.to_string();
-                self.str
-                    .replace_range(begin_byte_index..end_byte_index, &new_str);
+                if end_byte_index == self.str.len() {
+                    self.str
+                        .replace_range(begin_byte_index..end_byte_index, &new_str);
+                } else {
+                    self.str
+                        .replace_range(begin_byte_index..=end_byte_index, &new_str);
+                }
                 let after_byte_index = begin_byte_index + new_str.len();
                 let delta = self.str.grapheme_delta(begin, after_byte_index);
                 // we insert a char but the grapheme doesn't change, record it
