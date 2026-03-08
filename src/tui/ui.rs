@@ -87,18 +87,18 @@ pub fn render(app: &mut App) -> io::Result<()> {
     app.terminal.draw(|f| {
         let downloading_tasks = app.downloading_state.progress_suit.len();
         let downloading_tab = if downloading_tasks > 0 {
-            format!("Downloading ({})", downloading_tasks)
+            format!("Downloading ({})", downloading_tasks).into()
         } else {
-            "Downloading".to_string()
+            "Downloading".into()
         };
         // render tabs
-        let tabs = Tabs::new([
-            "Main".to_string(),
-            downloading_tab,
-            "Finished".to_string(),
-            "Filter Rules".to_string(),
-            "Running State".to_string(),
-            "Log".to_string(),
+        let tabs = Tabs::new::<[Line<'_>; _]>([
+            vec!["1 ".bold(), "Main".into()].into(),
+            vec!["2 ".bold(), downloading_tab].into(),
+            vec!["3 ".bold(), "Finished".into()].into(),
+            vec!["4 ".bold(), "Filter Rules".into()].into(),
+            vec!["5 ".bold(), "Running State".into()].into(),
+            vec!["6 ".bold(), "Log".into()].into(),
         ])
         .select(app.current_screen as usize);
         let main_layout =
