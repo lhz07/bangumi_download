@@ -3,7 +3,7 @@ use crate::recovery_signal::Waiting;
 use crate::socket_utils::{
     Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, Filter, SocketPath,
 };
-use crate::tui::animator::{AniCmd, Animator};
+use crate::tui::animator::{AniSender, AnimationManager};
 use crate::tui::events::LEvent;
 use crate::tui::loading_widget::LoadingState;
 use crate::tui::notification_widget::Notification;
@@ -84,7 +84,7 @@ pub struct App {
     pub(crate) is_logged_in: bool,
     pub(crate) filters: Vec<Filter>,
     pub(crate) waiting_state: Waiting,
-    pub(crate) animator_tx: UnboundedSender<AniCmd>,
+    pub(crate) ani_sender: AniSender,
 }
 
 impl App {
@@ -108,7 +108,7 @@ impl App {
             socket_rx,
             socket_path,
         ));
-        let (mut animator, animator_tx) = Animator::new(event_tx.clone());
+        let (mut animator, ani_sender) = AnimationManager::new(event_tx.clone());
         tokio::spawn(async move {
             animator.run().await;
         });
@@ -137,7 +137,7 @@ impl App {
             is_logged_in: false,
             filters: Vec::new(),
             waiting_state: Waiting::default(),
-            animator_tx,
+            ani_sender,
         };
         app.socket_tx.send_msg(ClientMsg::SyncQuery);
         app.socket_tx.send_msg(ClientMsg::GetWaitingState);

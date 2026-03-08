@@ -12,7 +12,37 @@ impl SafeSend<AniCmd> for UnboundedSender<AniCmd> {
     }
 }
 
+pub struct AniSender {
+    tx: UnboundedSender<AniCmd>,
+}
+
+impl AniSender {
+    pub fn new(tx: UnboundedSender<AniCmd>) -> Self {
+        Self { tx }
+    }
+    pub fn get_animator(&self) -> Animator {
+        Animator::new(self.tx.clone())
+    }
+}
+
 pub struct Animator {
+    tx: UnboundedSender<AniCmd>,
+}
+
+impl Animator {
+    fn new(tx: UnboundedSender<AniCmd>) -> Self {
+        tx.send_msg(AniCmd::Start);
+        Self { tx }
+    }
+}
+
+impl Drop for Animator {
+    fn drop(&mut self) {
+        self.tx.send_msg(AniCmd::Stop);
+    }
+}
+
+pub struct AnimationManager {
     current: u64,
     event_tx: UnboundedSender<LEvent>,
     rx: UnboundedReceiver<AniCmd>,
@@ -24,17 +54,17 @@ pub enum AniCmd {
     Stop,
 }
 
-impl Animator {
-    pub fn new(event_tx: UnboundedSender<LEvent>) -> (Self, UnboundedSender<AniCmd>) {
+impl AnimationManager {
+    pub fn new(event_tx: UnboundedSender<LEvent>) -> (Self, AniSender) {
         let (tx, rx) = unbounded_channel();
         let sleeper = Sleeper::new(Duration::from_millis(50));
-        let ani = Animator {
+        let ani = AnimationManager {
             current: 0,
             event_tx,
             rx,
             sleeper,
         };
-        (ani, tx)
+        (ani, AniSender::new(tx))
     }
     pub async fn run(&mut self) {
         loop {

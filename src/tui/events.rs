@@ -18,7 +18,7 @@ macro_rules! check_login {
             let noti = Notification::new(
                 "Failed".to_string(),
                 "Please login first!".to_string(),
-                $app.animator_tx.clone(),
+                $app.ani_sender.get_animator(),
             )
             .duration(Duration::from_secs(2));
             $app.notifications_queue.push_back(noti);
@@ -154,7 +154,7 @@ impl LEvent {
                             let noti = Notification::new(
                                 "Success".to_string(),
                                 info.into_string(),
-                                app.animator_tx.clone(),
+                                app.ani_sender.get_animator(),
                             );
                             app.notifications_queue.push_back(noti);
                         }
@@ -164,7 +164,7 @@ impl LEvent {
                             let noti = Notification::new(
                                 "Failed".to_string(),
                                 info,
-                                app.animator_tx.clone(),
+                                app.ani_sender.get_animator(),
                             );
                             app.notifications_queue.push_back(noti);
                         }
@@ -173,7 +173,7 @@ impl LEvent {
                             let noti = Notification::new(
                                 "Info".to_string(),
                                 info.into_string(),
-                                app.animator_tx.clone(),
+                                app.ani_sender.get_animator(),
                             );
                             app.notifications_queue.push_back(noti);
                         }
@@ -182,7 +182,7 @@ impl LEvent {
                             let noti = Notification::new(
                                 "Login State".to_string(),
                                 state.into_string(),
-                                app.animator_tx.clone(),
+                                app.ani_sender.get_animator(),
                             )
                             .duration(Duration::from_secs(2));
                             app.notifications_queue.push_back(noti);
@@ -198,7 +198,8 @@ impl LEvent {
                             app.qrcode_url = Ok(url);
                         }
                         ServerMsg::Loading => {
-                            app.loading_state = Some(LoadingState::new(app.animator_tx.clone()));
+                            app.loading_state =
+                                Some(LoadingState::new(app.ani_sender.get_animator()));
                         }
                         ServerMsg::SubFilter(filters) => {
                             app.filter_id_state.select(None);
@@ -331,7 +332,8 @@ impl LEvent {
                                 'r' => {
                                     check_login!(app);
                                     app.socket_tx.send_msg(ClientMsg::RefreshRSS);
-                                    let loading_state = LoadingState::new(app.animator_tx.clone());
+                                    let loading_state =
+                                        LoadingState::new(app.ani_sender.get_animator());
                                     app.loading_state = Some(loading_state);
                                 }
                                 // download a folder
@@ -624,7 +626,7 @@ impl LEvent {
                                         let noti = Notification::new(
                                             "Failed".to_string(),
                                             "This rule already exists!".to_string(),
-                                            app.animator_tx.clone(),
+                                            app.ani_sender.get_animator(),
                                         );
                                         app.notifications_queue.push_back(noti);
                                     }
@@ -660,7 +662,7 @@ impl LEvent {
                                             let noti = Notification::new(
                                                 "Failed".to_string(),
                                                 "This filter already exists!".to_string(),
-                                                app.animator_tx.clone(),
+                                                app.ani_sender.get_animator(),
                                             );
                                             app.notifications_queue.push_back(noti);
                                         }

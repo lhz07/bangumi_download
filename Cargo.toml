@@ -3,9 +3,6 @@ name = "bangumi_download"
 version = "0.1.0"
 edition = "2024"
 
-# [target.'cfg(target_env = "musl")'.dependencies]
-# openssl = { version = "0.10", features = ["vendored"] }
-
 [dependencies]
 futures = "0.3.31"
 once_cell = "1.21.1"
@@ -36,7 +33,6 @@ chrono = { version = "0.4.42", features = ["serde"] }
 strum = { version = "0.27.2", features = ["derive"] }
 unicode-segmentation = "1.12.0"
 textwrap = "0.16.2"
-# tui-logger = { git = "https://github.com/lhz07/tui-logger.git", branch = "patch-dep" }
 sha1 = "0.10.6"
 crossterm = { version = "0.29.0", features = ["event-stream"], default-features = false }
 
