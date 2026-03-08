@@ -1,7 +1,7 @@
 use crate::BROADCAST_TX;
 use crate::config_manager::SafeSend;
 use crate::socket_utils::ServerMsg;
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use once_cell::sync::Lazy;
 use std::iter::zip;
 use std::sync::Arc;

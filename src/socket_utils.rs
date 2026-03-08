@@ -6,13 +6,13 @@ use crate::main_proc::{
     read_socket, restart_refresh_download, restart_refresh_download_slow, write_socket,
 };
 use crate::recovery_signal::{RECOVERY_SIGNAL, Waiting};
-use crate::time_stamp::TimeStamp;
+use crate::time_stamp::TimeStampCoder;
 use crate::tui::progress_bar::{Inc, ProgressBar, ProgressState, ProgressSuit, SimpleBar};
 use crate::update_rss::{check_rss_link, rss_receive, start_rss_receive};
 use crate::{
     BROADCAST_TX, CLIENT_COUNT, CLIENT_WITH_RETRY, END_NOTIFY, LOGIN_STATUS, RSS_DATA_PERMIT, TX,
 };
-use bincode::{Decode, Encode};
+use bitcode::{Decode, DecodeOwned, Encode};
 use std::collections::HashMap;
 use std::env::temp_dir;
 use std::fs;
@@ -300,11 +300,11 @@ impl SocketListener {
                                 Some(str) => str.clone(),
                                 None => Bangumi::default(),
                             };
-                            Anime {
+                            AnimeCoder {
                                 id: id.clone(),
                                 name: name.clone(),
                                 rss_link: rss_link.clone(),
-                                last_update: latest.last_update,
+                                last_update: latest.last_update.into(),
                                 latest_episode: latest.latest_episode,
                             }
                         })
@@ -437,11 +437,11 @@ impl SocketListener {
                                         Some(str) => str.clone(),
                                         None => Bangumi::default(),
                                     };
-                                    Anime {
+                                    AnimeCoder {
                                         id: id.clone(),
                                         name: name.clone(),
                                         rss_link: rss_link.clone(),
-                                        last_update: latest.last_update,
+                                        last_update: latest.last_update.into(),
                                         latest_episode: latest.latest_episode,
                                     }
                                 })
@@ -484,11 +484,11 @@ impl SocketListener {
                                             Some(str) => str.clone(),
                                             None => Bangumi::default(),
                                         };
-                                        Anime {
+                                        AnimeCoder {
                                             id: id.clone(),
                                             name: name.clone(),
                                             rss_link: rss_link.clone(),
-                                            last_update: latest.last_update,
+                                            last_update: latest.last_update.into(),
                                             latest_episode: latest.latest_episode,
                                         }
                                     })
@@ -664,8 +664,7 @@ impl<T: Encode + std::marker::Send, U: AsyncWriteExt + std::marker::Unpin + std:
     AsyncWriteSocketMsg<T> for U
 {
     async fn write_msg(&mut self, msg: T) -> io::Result<()> {
-        let config = bincode::config::standard().with_big_endian();
-        let content = bincode::encode_to_vec(msg, config).unwrap();
+        let content = bitcode::encode(&msg);
         if content.len() > u32::MAX as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -681,8 +680,7 @@ impl<T: Encode + std::marker::Send, U: AsyncWriteExt + std::marker::Unpin + std:
 
 impl<T: Encode + std::marker::Send, U: std::io::Write> WriteSocketMsg<T> for U {
     fn write_msg(&mut self, msg: T) -> io::Result<()> {
-        let config = bincode::config::standard().with_big_endian();
-        let content = bincode::encode_to_vec(msg, config).unwrap();
+        let content = bitcode::encode(&msg);
         if content.len() > u32::MAX as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -695,7 +693,7 @@ impl<T: Encode + std::marker::Send, U: std::io::Write> WriteSocketMsg<T> for U {
     }
 }
 
-impl<T: Decode<()> + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + std::marker::Send>
+impl<T: DecodeOwned + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + std::marker::Send>
     AsyncReadSocketMsg<T> for U
 {
     async fn read_msg(&mut self) -> Result<T, io::Error> {
@@ -711,10 +709,8 @@ impl<T: Decode<()> + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + s
         }
         let mut content_buf = vec![0u8; u32::from_be_bytes(len_buf) as usize];
         self.read_exact(&mut content_buf).await?;
-        let config = bincode::config::standard().with_big_endian();
-        let msg = bincode::decode_from_slice::<T, _>(&content_buf, config)
-            .unwrap()
-            .0;
+        let msg = bitcode::decode::<T>(&content_buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(msg)
     }
 }
@@ -765,7 +761,7 @@ pub enum ServerMsg {
     QrcodeExpired,
     Ok(Box<str>),
     Info(Box<str>),
-    RSSData(Box<[Anime]>),
+    RSSData(Box<[AnimeCoder]>),
     WaitingState(Waiting),
     Loading,
     SubFilter(Box<[Filter]>),
@@ -804,10 +800,10 @@ pub struct DownloadMsg {
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
-pub struct Anime {
+pub struct AnimeCoder {
     pub id: String,
     pub name: String,
-    pub last_update: TimeStamp,
+    pub last_update: TimeStampCoder,
     pub latest_episode: String,
     pub rss_link: String,
 }
@@ -832,5 +828,5 @@ pub enum DownloadState {
 #[derive(Encode, Decode, Debug, Clone)]
 pub struct SyncInfo {
     pub progresses: ProgressSuit<SimpleBar>,
-    pub animes: Vec<Anime>,
+    pub animes: Vec<AnimeCoder>,
 }

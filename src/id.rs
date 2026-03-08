@@ -1,4 +1,4 @@
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use std::fmt;
 use std::sync::atomic::AtomicU64;
 

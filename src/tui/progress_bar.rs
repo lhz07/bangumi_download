@@ -1,5 +1,5 @@
 use crate::id::Id;
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;

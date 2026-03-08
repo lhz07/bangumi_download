@@ -1,6 +1,6 @@
 use crate::config_manager::SafeSend;
 use crate::socket_utils::{ClientMsg, DownloadState, Filter, ServerMsg};
-use crate::tui::app::{App, ListState};
+use crate::tui::app::{Anime, App, ListState};
 use crate::tui::confirm_widget::ActionConfirm;
 use crate::tui::loading_widget::LoadingState;
 use crate::tui::notification_widget::Notification;
@@ -108,30 +108,35 @@ impl LEvent {
                                 app.socket_tx.send_msg(ClientMsg::SyncQuery);
                             }
                         }
-                        ServerMsg::SyncResp(mut info) => {
+                        ServerMsg::SyncResp(info) => {
                             app.downloading_state.progress_suit = info.progresses;
                             // sort by last_update in descending order
-                            info.animes
-                                .sort_by(|a, b| b.last_update.cmp(&a.last_update));
+                            let mut animes = info
+                                .animes
+                                .into_iter()
+                                .map(|a| a.into())
+                                .collect::<Vec<Anime>>();
+                            animes.sort_by(|a, b| b.last_update.cmp(&a.last_update));
                             if let Some(index) = app.rss_state.selected() {
                                 let current_id = &app.rss_data[index].id;
-                                app.rss_state
-                                    .select(info.animes.iter().enumerate().find_map(
-                                        |(i, anime)| {
-                                            if &anime.id == current_id {
-                                                Some(i)
-                                            } else {
-                                                None
-                                            }
-                                        },
-                                    ));
+                                app.rss_state.select(animes.iter().enumerate().find_map(
+                                    |(i, anime)| {
+                                        if &anime.id == current_id {
+                                            Some(i)
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                ));
                             }
-                            app.rss_data = info.animes;
+                            app.rss_data = animes;
                             // log::info!("{:#?}", info.animes);
                         }
-                        ServerMsg::RSSData(mut animes) => {
+                        ServerMsg::RSSData(animes) => {
                             // clear loading animation
                             app.loading_state = None;
+                            let mut animes =
+                                animes.into_iter().map(|a| a.into()).collect::<Vec<Anime>>();
                             // sort by last_update in descending order
                             animes.sort_by(|a, b| b.last_update.cmp(&a.last_update));
                             if let Some(index) = app.rss_state.selected() {
@@ -146,7 +151,7 @@ impl LEvent {
                                     },
                                 ));
                             }
-                            app.rss_data = animes.into_vec();
+                            app.rss_data = animes.into_iter().map(|a| a.into()).collect();
                             log::info!("successfully updated RSS");
                         }
                         ServerMsg::Ok(info) => {

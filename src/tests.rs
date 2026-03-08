@@ -425,7 +425,7 @@ async fn test_get_file_info() {
 
 #[cfg(not(miri))]
 #[tokio::test]
-async fn test_bincode() {
+async fn test_bitcode() {
     let socket_path = SocketPath::new("bangumi_download_test.socket");
     let listener_path = socket_path.clone();
     let old_id = Id::generate();

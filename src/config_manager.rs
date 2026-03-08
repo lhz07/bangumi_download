@@ -1,6 +1,6 @@
 use crate::time_stamp::TimeStamp;
 use arc_swap::ArcSwap;
-use bincode::{Decode, Encode};
+use bitcode::{Decode, Encode};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

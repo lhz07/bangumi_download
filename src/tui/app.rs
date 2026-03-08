@@ -1,8 +1,9 @@
 use crate::config_manager::SafeSend;
 use crate::recovery_signal::Waiting;
 use crate::socket_utils::{
-    Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, Filter, SocketPath,
+    AnimeCoder, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, Filter, SocketPath,
 };
+use crate::time_stamp::TimeStamp;
 use crate::tui::animator::{AniSender, AnimationManager};
 use crate::tui::events::LEvent;
 use crate::tui::loading_widget::LoadingState;
@@ -63,6 +64,34 @@ impl Default for ListState {
 pub struct Handles {
     pub socket_handle: JoinHandle<Result<(), io::Error>>,
     pub ui_events_handle: JoinHandle<Result<(), io::Error>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Anime {
+    pub id: String,
+    pub name: String,
+    pub last_update: TimeStamp,
+    pub latest_episode: String,
+    pub rss_link: String,
+}
+
+impl From<AnimeCoder> for Anime {
+    fn from(value: AnimeCoder) -> Self {
+        let AnimeCoder {
+            id,
+            name,
+            last_update,
+            latest_episode,
+            rss_link,
+        } = value;
+        Self {
+            id,
+            name,
+            last_update: last_update.into(),
+            latest_episode,
+            rss_link,
+        }
+    }
 }
 
 pub struct App {

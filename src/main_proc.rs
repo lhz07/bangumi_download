@@ -3,7 +3,9 @@ use crate::config_manager::{Bangumi, CONFIG, Config, Message, SafeSend, modify_c
 use crate::errors::{CatError, CloudError, DownloadError};
 use crate::id::Id;
 use crate::recovery_signal::RECOVERY_SIGNAL;
-use crate::socket_utils::{Anime, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, ServerMsg};
+use crate::socket_utils::{
+    AnimeCoder, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, ServerMsg,
+};
 use crate::update_rss::start_rss_receive;
 use crate::{
     BROADCAST_TX, CLIENT_COUNT, END_NOTIFY, LOGIN_STATUS, REFRESH_DOWNLOAD, REFRESH_DOWNLOAD_SLOW,
@@ -112,11 +114,11 @@ pub async fn refresh_rss() {
                             Some(str) => str.clone(),
                             None => Bangumi::default(),
                         };
-                        Anime {
+                        AnimeCoder {
                             id: id.clone(),
                             name: name.clone(),
                             rss_link: rss_link.clone(),
-                            last_update: latest.last_update,
+                            last_update: latest.last_update.into(),
                             latest_episode: latest.latest_episode,
                         }
                     })
