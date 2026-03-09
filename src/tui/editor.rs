@@ -312,6 +312,38 @@ impl Editor {
             }
         }
     }
+
+    pub fn delete(&mut self) {
+        if self.str.is_empty() {
+            return;
+        }
+        match self.cursor {
+            Cursor::Normal {
+                index: ref mut cursor_index,
+            } => {
+                if *cursor_index >= self.str.len() {
+                    return;
+                }
+                self.insert_index.take();
+                let mut graphs = self.str.grapheme_indices(true);
+                let (index_of_cursor, _) =
+                    graphs.nth(*cursor_index).unwrap_or((self.str.len(), ""));
+                let (index_after_cursor, _) = graphs.next().unwrap_or((self.str.len(), ""));
+                self.str.drain(index_of_cursor..index_after_cursor);
+            }
+            Cursor::Select { begin, end, .. } => {
+                let (begin_byte_index, _) = self.str.grapheme_index_str(begin);
+                let (end_byte_index, _) = self.str.grapheme_index_str(end);
+                if end_byte_index == self.str.len() {
+                    self.str.drain(begin_byte_index..end_byte_index);
+                } else {
+                    self.str.drain(begin_byte_index..=end_byte_index);
+                }
+                self.cursor = Cursor::Normal { index: begin };
+            }
+        }
+    }
+
     pub fn insert(&mut self, ch: char) {
         // log::info!("editor: insert: {}", ch);
         // log::info!("current str: {:?}", self.str);

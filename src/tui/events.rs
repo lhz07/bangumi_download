@@ -292,6 +292,300 @@ impl LEvent {
         }
 
         match key.code {
+            KeyCode::Esc => {
+                // assume the popup takes the keyboard focus and we don't want to restore it
+                if app.current_popup.is_some() {
+                    match &mut app.input_state {
+                        InputState::NotInput => {
+                            app.current_popup = None;
+                        }
+                        InputState::Text(editor) => {
+                            if editor.has_selection() {
+                                editor.cancel_selection();
+                            } else {
+                                app.current_popup = None;
+                                app.input_state = InputState::NotInput;
+                            }
+                        }
+                    }
+                } else if app.current_screen == CurrentScreen::Filter && app.input_state.is_typing()
+                {
+                    app.input_state = InputState::NotInput;
+                    match app.filter_rule_state.selected() {
+                        Some(index) => {
+                            let filter_list = &mut app.filters
+                                [app.filter_id_state.selected().unwrap()]
+                            .subgroup
+                            .filter_list;
+                            if filter_list[index].is_empty() {
+                                filter_list.remove(index);
+                            }
+                        }
+                        None => {
+                            if let Some(index) = app.filter_id_state.selected()
+                                && app.filters[index].id.is_empty()
+                            {
+                                app.filters.remove(index);
+                            }
+                        }
+                    }
+                } else if app.current_screen != CurrentScreen::Main {
+                    app.current_screen = CurrentScreen::Main;
+                }
+            }
+            KeyCode::Backspace => {
+                if let InputState::Text(editor) = &mut app.input_state {
+                    editor.backspace();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(popup) = &app.current_popup {
+                    match popup {
+                        Popup::DownloadFolder => {
+                            if let InputState::Text(editor) = app.input_state.take()
+                                && !editor.is_empty()
+                            {
+                                let msg = ClientMsg::DownloadFolder(
+                                    editor.into_string().into_boxed_str(),
+                                );
+                                app.socket_tx.send_msg(msg);
+                                app.input_state = InputState::NotInput;
+                                app.current_popup = None;
+                            }
+                        }
+                        Popup::AddRSSLink => {
+                            if let InputState::Text(editor) = app.input_state.take()
+                                && !editor.is_empty()
+                            {
+                                let msg = ClientMsg::AddRSS(editor.into_string().into_boxed_str());
+                                app.socket_tx.send_msg(msg);
+                                app.input_state = InputState::NotInput;
+                                app.current_popup = None;
+                            }
+                        }
+                        _ => (),
+                    }
+                } else if let CurrentScreen::Filter = app.current_screen
+                    && app.input_state.is_typing()
+                {
+                    match app.filter_rule_state.selected() {
+                        Some(index) => {
+                            let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
+                            let rules = &mut filter.subgroup.filter_list;
+                            let old_rule = &rules[index];
+                            if let InputState::Text(editor) = app.input_state.take()
+                                && !editor.is_empty()
+                            {
+                                let editor_str = editor.into_string();
+                                if !rules.contains(&editor_str) {
+                                    rules[index] = editor_str;
+                                    app.socket_tx
+                                        .send_msg(ClientMsg::InsertFilter(filter.clone()));
+                                    app.input_state = InputState::NotInput;
+                                } else {
+                                    if old_rule != &editor_str {
+                                        let noti = Notification::new(
+                                            "Failed".to_string(),
+                                            "This rule already exists!".to_string(),
+                                            app.ani_sender.get_animator(),
+                                        );
+                                        app.notifications_queue.push_back(noti);
+                                    }
+                                    app.input_state = InputState::text(editor_str);
+                                }
+                            }
+                        }
+                        None => {
+                            if let Some(index) = app.filter_id_state.selected() {
+                                let old_filter_id = &app.filters[index].id;
+                                if let InputState::Text(editor) = app.input_state.take()
+                                    && !editor.is_empty()
+                                {
+                                    let editor_str = editor.into_string();
+                                    if app.filters.iter().any(|f| f.id == editor_str) {
+                                        // if old id is not empty, it means that we are editing the old id,
+                                        // so we should delete the old one first
+                                        if !old_filter_id.is_empty() {
+                                            app.socket_tx.send_msg(ClientMsg::DelFilter(
+                                                old_filter_id.clone(),
+                                            ));
+                                        }
+                                        let filter = &mut app.filters[index];
+                                        filter.id = editor_str;
+                                        app.socket_tx
+                                            .send_msg(ClientMsg::InsertFilter(filter.clone()));
+                                        app.input_state = InputState::NotInput;
+                                    } else {
+                                        // the new id is already in the list, but it may be equal to the
+                                        // old one, at this situation we should do nothing. If not, it means
+                                        // the id is duplicate, so send a nofication here.
+                                        if old_filter_id != &editor_str {
+                                            let noti = Notification::new(
+                                                "Failed".to_string(),
+                                                "This filter already exists!".to_string(),
+                                                app.ani_sender.get_animator(),
+                                            );
+                                            app.notifications_queue.push_back(noti);
+                                        }
+                                        app.input_state = InputState::text(editor_str);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Delete => {
+                if let InputState::Text(editor) = &mut app.input_state {
+                    editor.delete();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') if !app.input_state.is_typing() => {
+                let scroll_down = |state: &mut ListState| {
+                    if state.offset + 1 < state.progress_suit.len() {
+                        state.offset += 1;
+                        state.scroll_state = state.scroll_state.position(state.offset);
+                    }
+                };
+                match &app.current_screen {
+                    CurrentScreen::Main
+                        if app.current_popup.is_none() && !app.rss_data.is_empty() =>
+                    {
+                        match app.rss_state.selected() {
+                            Some(index) => {
+                                if index + 1 < app.rss_data.len() {
+                                    app.rss_state.select(Some(index + 1));
+                                }
+                            }
+                            None => {
+                                app.rss_state.select(Some(0));
+                            }
+                        }
+                    }
+                    CurrentScreen::Downloading => {
+                        let state = &mut app.downloading_state;
+                        scroll_down(state);
+                    }
+                    CurrentScreen::Finished => {
+                        let state = &mut app.finished_state;
+                        scroll_down(state);
+                    }
+                    CurrentScreen::Filter
+                        if !app.filters.is_empty() && !app.input_state.is_typing() =>
+                    {
+                        match app.filter_rule_state.selected() {
+                            Some(index) => {
+                                let list_len = app.filters[app.filter_id_state.selected().unwrap()]
+                                    .subgroup
+                                    .filter_list
+                                    .len();
+                                if index + 1 < list_len {
+                                    app.filter_rule_state.select(Some(index + 1));
+                                }
+                            }
+                            None => match app.filter_id_state.selected() {
+                                Some(index) => {
+                                    if index + 1 < app.filters.len() {
+                                        app.filter_id_state.select(Some(index + 1));
+                                    }
+                                }
+                                None => {
+                                    app.filter_id_state.select(Some(0));
+                                }
+                            },
+                        }
+                    }
+                    CurrentScreen::Log => {
+                        app.log_widget_state
+                            .transition(tui_logger::TuiWidgetEvent::NextPageKey);
+                    }
+                    _ => (),
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') if !app.input_state.is_typing() => {
+                let scroll_up = |state: &mut ListState| {
+                    if state.offset > 0 {
+                        state.offset -= 1;
+                        state.scroll_state = state.scroll_state.position(state.offset);
+                    }
+                };
+                match &mut app.current_screen {
+                    CurrentScreen::Main
+                        if app.current_popup.is_none() && !app.rss_data.is_empty() =>
+                    {
+                        match app.rss_state.selected() {
+                            Some(index) => {
+                                app.rss_state.select(Some(index.saturating_sub(1)));
+                            }
+                            None => {
+                                app.rss_state.select(Some(app.rss_data.len() - 1));
+                            }
+                        }
+                    }
+                    CurrentScreen::Downloading => {
+                        let state = &mut app.downloading_state;
+                        scroll_up(state);
+                    }
+                    CurrentScreen::Finished => {
+                        let state = &mut app.finished_state;
+                        scroll_up(state);
+                    }
+                    CurrentScreen::Filter
+                        if !app.filters.is_empty() && !app.input_state.is_typing() =>
+                    {
+                        match app.filter_rule_state.selected() {
+                            Some(index) => {
+                                app.filter_rule_state.select(Some(index.saturating_sub(1)));
+                            }
+                            None => match app.filter_id_state.selected() {
+                                Some(index) => {
+                                    app.filter_id_state.select(Some(index.saturating_sub(1)));
+                                }
+                                None => {
+                                    app.filter_id_state.select(Some(app.filters.len() - 1));
+                                }
+                            },
+                        }
+                    }
+                    CurrentScreen::Log => {
+                        app.log_widget_state
+                            .transition(tui_logger::TuiWidgetEvent::PrevPageKey);
+                    }
+                    _ => (),
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') if !app.input_state.is_typing() => {
+                if let CurrentScreen::Filter = app.current_screen
+                    && app.filter_rule_state.selected().is_none()
+                    && let Some(index) = app.filter_id_state.selected()
+                {
+                    if !app.filters[index].subgroup.filter_list.is_empty() {
+                        app.filter_rule_state.select(Some(0));
+                    } else {
+                        app.filters[index].subgroup.filter_list.push(String::new());
+                        app.input_state = InputState::empty_text();
+                        app.filter_rule_state.select(Some(0));
+                    }
+                }
+            }
+            KeyCode::Right => {
+                // TODO: switch to `if let` guards when it is stabilized
+                if let InputState::Text(editor) = &mut app.input_state {
+                    editor.right_arrow();
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') if !app.input_state.is_typing() => {
+                if let CurrentScreen::Filter = app.current_screen
+                    && app.filter_rule_state.selected().is_some()
+                {
+                    app.filter_rule_state.select(None);
+                }
+            }
+            KeyCode::Left => {
+                if let InputState::Text(editor) = &mut app.input_state {
+                    editor.left_arrow();
+                }
+            }
             KeyCode::Char(char) => {
                 match &mut app.input_state {
                     InputState::NotInput => match char {
@@ -534,288 +828,6 @@ impl LEvent {
                     InputState::Text(str) => {
                         str.insert(char);
                     }
-                }
-            }
-            KeyCode::Esc => {
-                // assume the popup takes the keyboard focus and we don't want to restore it
-                if app.current_popup.is_some() {
-                    match &mut app.input_state {
-                        InputState::NotInput => {
-                            app.current_popup = None;
-                        }
-                        InputState::Text(editor) => {
-                            if editor.has_selection() {
-                                editor.cancel_selection();
-                            } else {
-                                app.current_popup = None;
-                                app.input_state = InputState::NotInput;
-                            }
-                        }
-                    }
-                } else if app.current_screen == CurrentScreen::Filter && app.input_state.is_typing()
-                {
-                    app.input_state = InputState::NotInput;
-                    match app.filter_rule_state.selected() {
-                        Some(index) => {
-                            let filter_list = &mut app.filters
-                                [app.filter_id_state.selected().unwrap()]
-                            .subgroup
-                            .filter_list;
-                            if filter_list[index].is_empty() {
-                                filter_list.remove(index);
-                            }
-                        }
-                        None => {
-                            if let Some(index) = app.filter_id_state.selected()
-                                && app.filters[index].id.is_empty()
-                            {
-                                app.filters.remove(index);
-                            }
-                        }
-                    }
-                } else if app.current_screen != CurrentScreen::Main {
-                    app.current_screen = CurrentScreen::Main;
-                }
-            }
-            KeyCode::Backspace => {
-                if let InputState::Text(editor) = &mut app.input_state {
-                    editor.backspace();
-                }
-            }
-            KeyCode::Enter => {
-                if let Some(popup) = &app.current_popup {
-                    match popup {
-                        Popup::DownloadFolder => {
-                            if let InputState::Text(editor) = app.input_state.take()
-                                && !editor.is_empty()
-                            {
-                                let msg = ClientMsg::DownloadFolder(
-                                    editor.into_string().into_boxed_str(),
-                                );
-                                app.socket_tx.send_msg(msg);
-                                app.input_state = InputState::NotInput;
-                                app.current_popup = None;
-                            }
-                        }
-                        Popup::AddRSSLink => {
-                            if let InputState::Text(editor) = app.input_state.take()
-                                && !editor.is_empty()
-                            {
-                                let msg = ClientMsg::AddRSS(editor.into_string().into_boxed_str());
-                                app.socket_tx.send_msg(msg);
-                                app.input_state = InputState::NotInput;
-                                app.current_popup = None;
-                            }
-                        }
-                        _ => (),
-                    }
-                } else if let CurrentScreen::Filter = app.current_screen
-                    && app.input_state.is_typing()
-                {
-                    match app.filter_rule_state.selected() {
-                        Some(index) => {
-                            let filter = &mut app.filters[app.filter_id_state.selected().unwrap()];
-                            let rules = &mut filter.subgroup.filter_list;
-                            let old_rule = &rules[index];
-                            if let InputState::Text(editor) = app.input_state.take()
-                                && !editor.is_empty()
-                            {
-                                let editor_str = editor.into_string();
-                                if !rules.contains(&editor_str) {
-                                    rules[index] = editor_str;
-                                    app.socket_tx
-                                        .send_msg(ClientMsg::InsertFilter(filter.clone()));
-                                    app.input_state = InputState::NotInput;
-                                } else {
-                                    if old_rule != &editor_str {
-                                        let noti = Notification::new(
-                                            "Failed".to_string(),
-                                            "This rule already exists!".to_string(),
-                                            app.ani_sender.get_animator(),
-                                        );
-                                        app.notifications_queue.push_back(noti);
-                                    }
-                                    app.input_state = InputState::text(editor_str);
-                                }
-                            }
-                        }
-                        None => {
-                            if let Some(index) = app.filter_id_state.selected() {
-                                let old_filter_id = &app.filters[index].id;
-                                if let InputState::Text(editor) = app.input_state.take()
-                                    && !editor.is_empty()
-                                {
-                                    let editor_str = editor.into_string();
-                                    if app.filters.iter().any(|f| f.id == editor_str) {
-                                        // if old id is not empty, it means that we are editing the old id,
-                                        // so we should delete the old one first
-                                        if !old_filter_id.is_empty() {
-                                            app.socket_tx.send_msg(ClientMsg::DelFilter(
-                                                old_filter_id.clone(),
-                                            ));
-                                        }
-                                        let filter = &mut app.filters[index];
-                                        filter.id = editor_str;
-                                        app.socket_tx
-                                            .send_msg(ClientMsg::InsertFilter(filter.clone()));
-                                        app.input_state = InputState::NotInput;
-                                    } else {
-                                        // the new id is already in the list, but it may be equal to the
-                                        // old one, at this situation we should do nothing. If not, it means
-                                        // the id is duplicate, so send a nofication here.
-                                        if old_filter_id != &editor_str {
-                                            let noti = Notification::new(
-                                                "Failed".to_string(),
-                                                "This filter already exists!".to_string(),
-                                                app.ani_sender.get_animator(),
-                                            );
-                                            app.notifications_queue.push_back(noti);
-                                        }
-                                        app.input_state = InputState::text(editor_str);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            KeyCode::Down => {
-                let scroll_down = |state: &mut ListState| {
-                    if state.offset + 1 < state.progress_suit.len() {
-                        state.offset += 1;
-                        state.scroll_state = state.scroll_state.position(state.offset);
-                    }
-                };
-                match &app.current_screen {
-                    CurrentScreen::Main
-                        if app.current_popup.is_none() && !app.rss_data.is_empty() =>
-                    {
-                        match app.rss_state.selected() {
-                            Some(index) => {
-                                if index + 1 < app.rss_data.len() {
-                                    app.rss_state.select(Some(index + 1));
-                                }
-                            }
-                            None => {
-                                app.rss_state.select(Some(0));
-                            }
-                        }
-                    }
-                    CurrentScreen::Downloading => {
-                        let state = &mut app.downloading_state;
-                        scroll_down(state);
-                    }
-                    CurrentScreen::Finished => {
-                        let state = &mut app.finished_state;
-                        scroll_down(state);
-                    }
-                    CurrentScreen::Filter
-                        if !app.filters.is_empty() && !app.input_state.is_typing() =>
-                    {
-                        match app.filter_rule_state.selected() {
-                            Some(index) => {
-                                let list_len = app.filters[app.filter_id_state.selected().unwrap()]
-                                    .subgroup
-                                    .filter_list
-                                    .len();
-                                if index + 1 < list_len {
-                                    app.filter_rule_state.select(Some(index + 1));
-                                }
-                            }
-                            None => match app.filter_id_state.selected() {
-                                Some(index) => {
-                                    if index + 1 < app.filters.len() {
-                                        app.filter_id_state.select(Some(index + 1));
-                                    }
-                                }
-                                None => {
-                                    app.filter_id_state.select(Some(0));
-                                }
-                            },
-                        }
-                    }
-                    CurrentScreen::Log => {
-                        app.log_widget_state
-                            .transition(tui_logger::TuiWidgetEvent::NextPageKey);
-                    }
-                    _ => (),
-                }
-            }
-            KeyCode::Up => {
-                let scroll_up = |state: &mut ListState| {
-                    if state.offset > 0 {
-                        state.offset -= 1;
-                        state.scroll_state = state.scroll_state.position(state.offset);
-                    }
-                };
-                match &mut app.current_screen {
-                    CurrentScreen::Main
-                        if app.current_popup.is_none() && !app.rss_data.is_empty() =>
-                    {
-                        match app.rss_state.selected() {
-                            Some(index) => {
-                                app.rss_state.select(Some(index.saturating_sub(1)));
-                            }
-                            None => {
-                                app.rss_state.select(Some(app.rss_data.len() - 1));
-                            }
-                        }
-                    }
-                    CurrentScreen::Downloading => {
-                        let state = &mut app.downloading_state;
-                        scroll_up(state);
-                    }
-                    CurrentScreen::Finished => {
-                        let state = &mut app.finished_state;
-                        scroll_up(state);
-                    }
-                    CurrentScreen::Filter
-                        if !app.filters.is_empty() && !app.input_state.is_typing() =>
-                    {
-                        match app.filter_rule_state.selected() {
-                            Some(index) => {
-                                app.filter_rule_state.select(Some(index.saturating_sub(1)));
-                            }
-                            None => match app.filter_id_state.selected() {
-                                Some(index) => {
-                                    app.filter_id_state.select(Some(index.saturating_sub(1)));
-                                }
-                                None => {
-                                    app.filter_id_state.select(Some(app.filters.len() - 1));
-                                }
-                            },
-                        }
-                    }
-                    CurrentScreen::Log => {
-                        app.log_widget_state
-                            .transition(tui_logger::TuiWidgetEvent::PrevPageKey);
-                    }
-                    _ => (),
-                }
-            }
-            KeyCode::Right => {
-                if let InputState::Text(editor) = &mut app.input_state {
-                    editor.right_arrow();
-                } else if let CurrentScreen::Filter = app.current_screen
-                    && app.filter_rule_state.selected().is_none()
-                    && let Some(index) = app.filter_id_state.selected()
-                {
-                    if !app.filters[index].subgroup.filter_list.is_empty() {
-                        app.filter_rule_state.select(Some(0));
-                    } else {
-                        app.filters[index].subgroup.filter_list.push(String::new());
-                        app.input_state = InputState::empty_text();
-                        app.filter_rule_state.select(Some(0));
-                    }
-                }
-            }
-            KeyCode::Left => {
-                if let InputState::Text(editor) = &mut app.input_state {
-                    editor.left_arrow();
-                } else if let CurrentScreen::Filter = app.current_screen
-                    && app.filter_rule_state.selected().is_some()
-                {
-                    app.filter_rule_state.select(None);
                 }
             }
             _ => {}
