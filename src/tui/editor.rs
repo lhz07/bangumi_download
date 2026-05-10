@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Stylize};
+use ratatui::style::{Color, Modifier, Stylize};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -410,9 +410,25 @@ impl Editor {
             }
         }
     }
+
     pub fn to_reversed_line(&self) -> Line<'_> {
-        self.to_line()
+        let mut line = self.to_line();
+        for span in &mut line.spans {
+            if span.style.bg.is_some() {
+                span.style = span.style.fg(Color::White);
+                continue;
+            }
+            if span.style.add_modifier & Modifier::REVERSED == Modifier::REVERSED {
+                span.style.add_modifier &= !Modifier::REVERSED;
+                span.style.sub_modifier |= Modifier::REVERSED;
+            } else if span.style.sub_modifier & Modifier::REVERSED == Modifier::REVERSED {
+                span.style.sub_modifier &= !Modifier::REVERSED;
+                span.style.add_modifier |= Modifier::REVERSED;
+            }
+        }
+        line
     }
+
     pub fn to_line(&self) -> Line<'_> {
         match self.cursor {
             Cursor::Normal { index } => {

@@ -402,7 +402,7 @@ impl LEvent {
                                     && !editor.is_empty()
                                 {
                                     let editor_str = editor.into_string();
-                                    if app.filters.iter().any(|f| f.id == editor_str) {
+                                    if !app.filters.iter().any(|f| f.id == editor_str) {
                                         // if old id is not empty, it means that we are editing the old id,
                                         // so we should delete the old one first
                                         if !old_filter_id.is_empty() {
