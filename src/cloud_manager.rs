@@ -199,9 +199,23 @@ pub async fn download_file(
         "path's parent folder is missing".to_string(),
     ))?)
     .await?;
-    // if the file exists, delete it first
+    // if the file exists, check the hash
     if sfs::exists(path)? {
-        sfs::remove_file(path)?;
+        let sha1 = sha1_of_file(path)?;
+        // `sha1` is upper case, ensure `hash` is upper case, too.
+        hash.make_ascii_uppercase();
+        if sha1 == hash {
+            let msg = ServerMsg::Download(DownloadMsg {
+                id,
+                state: DownloadState::Finished,
+            });
+            BROADCAST_TX.send_msg(msg);
+            println!("file exists, passed hash check, {:?} finished!", path);
+            // return early
+            return Ok(());
+        } else {
+            sfs::remove_file(path)?;
+        }
     }
     let mut file = sfs::File::create(path)?;
     download_single(url, client, &mut file, id).await?;
