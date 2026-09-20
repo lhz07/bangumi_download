@@ -373,9 +373,9 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, CloudE
         .await?;
     let tasks_response: TasksResponse = match serde_json::from_str(&response) {
         Ok(value) => value,
-        Err(_) => {
+        Err(e) => {
             return Err(CloudError::Api(format!(
-                "Can not get valid tasks list! Error response: {response}"
+                "Can not get valid tasks list! Parse error: {e}\nError response: {response}"
             )));
         }
     };
