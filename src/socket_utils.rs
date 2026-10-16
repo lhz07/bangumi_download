@@ -590,6 +590,7 @@ impl SocketListener {
         let interval = Duration::from_millis(70);
         let timeout = Duration::from_millis(100);
         let mut deadline = OneShotSleep::new();
+        deadline.set_instant(last_send + timeout);
         loop {
             select! {
                 stream_msg = stream_read_rx.recv() => {
