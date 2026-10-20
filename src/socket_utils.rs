@@ -1,3 +1,4 @@
+use crate::checker::Checker;
 use crate::cloud_manager::{download_a_folder, get_cloud_cookies};
 use crate::config_manager::{Bangumi, CONFIG, Config, Message, SafeSend, SubGroup};
 use crate::errors::{CatError, SocketError};
@@ -28,7 +29,6 @@ use tokio::select;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 
 // traits ------------------------------------------------
 pub trait SocketStateDetect {
@@ -198,38 +198,6 @@ impl SocketListener {
             for i in error_key {
                 self.stream_write_txs.remove(&i);
             }
-        }
-    }
-    /// handle the original server messages, and forward them
-    async fn handle_msg_and_broadcast(
-        &mut self,
-        first_msg: ServerMsg,
-        last_send: &mut Instant,
-        unhandle_latest: &mut bool,
-        interval: &Duration,
-        timeout: &Duration,
-        deadline: &mut OneShotSleep,
-    ) {
-        // change the state here
-        // if the msg is instant msg, forward it, and if `unhandle_latest` is false, return.
-        // if we received an instant msg, and `unhandle_latest` is false, that means the state is in sync,
-        // there is no need to send the state again
-        if let Some(msg) = self.receive_broadcast(first_msg).await {
-            self.broadcast(msg);
-            if !*unhandle_latest {
-                return;
-            }
-        }
-        if !self.state.is_empty() && last_send.elapsed() >= *interval {
-            // send state here
-            let state = self.state.state();
-            self.broadcast(ServerMsg::DownloadSync(state.into_boxed_slice()));
-            *last_send = Instant::now();
-            // reset deadline
-            deadline.set_instant(*last_send + *timeout);
-            *unhandle_latest = false;
-        } else {
-            *unhandle_latest = true;
         }
     }
 
@@ -583,14 +551,9 @@ impl SocketListener {
     ) {
         // replace the default tx
         self.stream_read_tx = stream_read_tx;
-        let mut last_send = Instant::now();
-
-        let mut unhandle_latest = false;
         // interval: time interval between sending messages
         let interval = Duration::from_millis(70);
-        let timeout = Duration::from_millis(100);
-        let mut deadline = OneShotSleep::new();
-        deadline.set_instant(last_send + timeout);
+        let mut checker = Checker::new(interval);
         loop {
             select! {
                 stream_msg = stream_read_rx.recv() => {
@@ -602,17 +565,20 @@ impl SocketListener {
                     self.accept_stream(accept_result).await;
                 }
                 Some(msg) = rx.recv() => {
-                    self.handle_msg_and_broadcast(msg, &mut last_send, &mut unhandle_latest, &interval, &timeout, &mut deadline).await;
+                    // if the msg is instant msg, forward it
+                    // else, we update the state and activate the checker
+                    if let Some(msg) = self.receive_broadcast(msg).await {
+                        self.broadcast(msg);
+                    }else{
+                        checker.activate();
+                    }
                 }
                 // send the unsend msg
-                _ = deadline.wait() => {
-                    // println!("deadline reached!");
-                    if !self.state.is_empty() && unhandle_latest{
-                        // send state
-                        let state = self.state.state().into_boxed_slice();
-                        self.broadcast(ServerMsg::DownloadSync(state));
-                        unhandle_latest = false;
-                    }
+                _ = checker.wait() => {
+                    println!("deadline reached!");
+                    // send state
+                    let state = self.state.state().into_boxed_slice();
+                    self.broadcast(ServerMsg::DownloadSync(state));
                 }
                 _ = END_NOTIFY.notified() => {
                     println!("Socket listener is exiting...");
@@ -713,43 +679,6 @@ impl<T: DecodeOwned + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + 
         let msg = bitcode::decode::<T>(&content_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(msg)
-    }
-}
-
-pub struct OneShotSleep {
-    instant: Option<Instant>,
-}
-
-impl Default for OneShotSleep {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OneShotSleep {
-    pub fn new() -> Self {
-        let instant = None;
-        OneShotSleep { instant }
-    }
-
-    /// set sleep duration
-    pub fn set_instant(&mut self, instant: Instant) {
-        self.instant = Some(instant);
-    }
-
-    /// wait forever or sleep for a duration
-    pub async fn wait(&mut self) {
-        match self.instant {
-            Some(ins) => {
-                // this sleep may be interrupted
-                tokio::time::sleep_until(ins).await;
-                self.instant = None;
-            }
-            None => {
-                // wait forever
-                futures::future::pending::<()>().await;
-            }
-        }
     }
 }
 

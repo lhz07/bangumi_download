@@ -1,4 +1,5 @@
 pub mod cas_guard;
+pub mod checker;
 pub mod cloud;
 pub mod cloud_manager;
 pub mod config_manager;

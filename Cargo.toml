@@ -38,3 +38,7 @@ bitcode = "0.6.9"
 
 [profile.release]
 strip = true
+
+[dev-dependencies]
+tokio = { version = "1.52.1", features = ["net", "fs", "rt", "rt-multi-thread", "sync", "macros", "io-util", "time", "test-util"] }
+
