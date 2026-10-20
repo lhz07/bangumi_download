@@ -97,6 +97,7 @@ impl Future for Pending {
 /// | 50  | 50 | 50 | 50 |         2000   |   3000  | 50 | 100 | 200 | 700|
 ///
 /// |50|tick|       1000      |tick|1150|tick|3000|tick|             1000|tick
+#[cfg_attr(miri, ignore = "miri doesn't support tokio")]
 #[tokio::test]
 async fn checker_test() {
     let mut checker = Checker::new(Duration::from_secs(1));
