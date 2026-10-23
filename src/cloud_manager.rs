@@ -121,7 +121,7 @@ pub fn extract_magnet_hash(link: &str) -> Option<String> {
 
 pub async fn get_cloud_cookies() -> Result<String, CatError> {
     let try_times = AtomicBool::new(false);
-    match Retry::spawn(FixedInterval::from_millis(5000).take(2), async || {
+    match Retry::start(FixedInterval::from_millis(5000).take(2), async || {
         if try_times.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("waiting for retry...");
         }
