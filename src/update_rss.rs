@@ -403,7 +403,7 @@ pub async fn rss_receive(
                 tx.send_msg(msg);
                 let notify = Arc::new(Notify::new());
                 let cmd = Box::new(|config: &mut Config| {
-                    config.hash_ani.extend(hash_ani.into_iter());
+                    config.hash_ani.extend(hash_ani);
                 });
                 let msg = Message::new(cmd, Some(notify.clone()));
                 tx.send_msg(msg);
@@ -420,7 +420,7 @@ pub async fn rss_receive(
                 });
                 let msg = Message::new(cmd, None);
                 tx.send_msg(msg);
-                return Err(CloudError::Api("Can not add magnet to cloud!".to_string()))?;
+                Err(CloudError::Api("Can not add magnet to cloud!".to_string()))?;
             }
         }
     }

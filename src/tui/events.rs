@@ -116,7 +116,7 @@ impl LEvent {
                                 .into_iter()
                                 .map(|a| a.into())
                                 .collect::<Vec<Anime>>();
-                            animes.sort_by(|a, b| b.last_update.cmp(&a.last_update));
+                            animes.sort_by_key(|a| std::cmp::Reverse(a.last_update));
                             if let Some(index) = app.rss_state.selected() {
                                 let current_id = &app.rss_data[index].id;
                                 app.rss_state.select(animes.iter().enumerate().find_map(
@@ -138,7 +138,7 @@ impl LEvent {
                             let mut animes =
                                 animes.into_iter().map(|a| a.into()).collect::<Vec<Anime>>();
                             // sort by last_update in descending order
-                            animes.sort_by(|a, b| b.last_update.cmp(&a.last_update));
+                            animes.sort_by_key(|a| std::cmp::Reverse(a.last_update));
                             if let Some(index) = app.rss_state.selected() {
                                 let current_id = &app.rss_data[index].id;
                                 app.rss_state.select(animes.iter().enumerate().find_map(
@@ -151,7 +151,7 @@ impl LEvent {
                                     },
                                 ));
                             }
-                            app.rss_data = animes.into_iter().map(|a| a.into()).collect();
+                            app.rss_data = animes;
                             log::info!("successfully updated RSS");
                         }
                         ServerMsg::Ok(info) => {
