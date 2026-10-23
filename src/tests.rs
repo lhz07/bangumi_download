@@ -17,7 +17,7 @@ use std::sync::Arc;
 // when the tests are failed
 // These tests only test part of the functions
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "miri doesn't support tokio")]
 #[tokio::test]
 async fn test_get_a_magnet_link() {
     use crate::update_rss::get_a_magnet_link;
@@ -44,7 +44,7 @@ async fn test_get_a_magnet_link() {
     );
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "miri doesn't support tokio")]
 #[tokio::test]
 async fn test_check_rss_link_and_url_parse() {
     use crate::update_rss::check_rss_link;
@@ -143,7 +143,7 @@ async fn test_check_rss_link_and_url_parse() {
     }
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "no need to test under miri")]
 #[test]
 fn test_extract_magnet_hash() {
     use crate::cloud_manager::extract_magnet_hash;
@@ -165,7 +165,7 @@ fn test_extract_magnet_hash() {
     }
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "miri doesn't support tokio")]
 #[tokio::test]
 async fn test_status_iter() {
     use crate::REFRESH_NOTIFY;
@@ -196,7 +196,7 @@ async fn test_status_iter() {
     assert_eq!(timer.elapsed().as_secs(), 1);
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "miri doesn't support tokio")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_xml() {
     use crate::update_rss::{RSS, get_response_text};
@@ -221,14 +221,14 @@ async fn test_xml() {
     let _result = de::from_str::<RSS>(&response).unwrap();
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "miri doesn't support IO")]
 #[test]
 fn test_serialize_config() {
     let config_str = read_to_string("tests/config.json").unwrap();
     let _config = serde_json::from_str::<Config>(&config_str).unwrap();
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "miri doesn't support tokio")]
 #[tokio::test]
 async fn config_test() {
     use config_manager::CONFIG;
@@ -287,7 +287,7 @@ async fn config_test() {
     assert_eq!(result, expect_result);
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "no need to test under miri")]
 #[test]
 fn test_xor() {
     use crypto::xor;
@@ -301,7 +301,7 @@ fn test_xor() {
     println!("{:?}", buf);
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "no need to test under miri")]
 #[test]
 fn test_encode() {
     let key = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
@@ -423,7 +423,7 @@ async fn test_get_file_info() {
     println!("{:?}", result);
 }
 
-#[cfg(not(miri))]
+#[cfg_attr(miri, ignore = "miri doesn't support tokio")]
 #[tokio::test]
 async fn test_bitcode() {
     let socket_path = SocketPath::new("bangumi_download_test.socket");
