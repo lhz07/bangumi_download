@@ -120,7 +120,7 @@ pub enum HandleType {
 pub struct SocketListener {
     listener: ManuallyDrop<UnixListener>,
     stream_read_tx: UnboundedSender<(Id, ClientMsg)>,
-    stream_write_txs: HashMap<Id, UnboundedSender<ServerMsg>>,
+    stream_write_txs: HashMap<Id, UnboundedSender<ServerMsgExt>>,
     path: PathBuf,
     state: ProgressSuit<ProgressBar>,
     handles: HashMap<HandleType, (Id, JoinHandle<()>)>,
@@ -149,7 +149,7 @@ impl SocketListener {
                 // which means we should use a lock or a channel.
                 let (read, write) = stream.into_split();
                 let id = Id::generate();
-                let (write_tx, write_rx) = unbounded_channel::<ServerMsg>();
+                let (write_tx, write_rx) = unbounded_channel();
                 let stream_read_tx = self.stream_read_tx.clone();
                 let write_tx_1 = write_tx.clone();
                 let count = CLIENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -176,29 +176,30 @@ impl SocketListener {
 
     /// broadcast server message to every stream
     fn broadcast(&mut self, msg: ServerMsg) {
-        if self.stream_write_txs.is_empty() {
-            // explicitly return to avoid collect
-            return;
-        }
-        let mut error_key = Vec::new();
-        if let [other @ .., (last_key, last_tx)] =
-            self.stream_write_txs.iter().collect::<Vec<_>>().as_slice()
-        {
-            for (i, tx) in other {
-                if let Err(e) = tx.send(msg.clone()) {
+        match self.stream_write_txs.iter().next() {
+            // send msg to the only one client
+            Some((&id, tx)) if self.stream_write_txs.len() == 1 => {
+                if let Err(e) = tx.send(msg.into()) {
                     eprintln!("stream write error: {}", e);
-                    error_key.push(**i);
+                    self.stream_write_txs.remove(&id);
                 }
+                return;
             }
-            if let Err(e) = last_tx.send(msg) {
-                eprintln!("stream write error: {}", e);
-                error_key.push(**last_key);
-            }
-
-            for i in error_key {
-                self.stream_write_txs.remove(&i);
-            }
+            // explicitly return to avoid encode
+            None => return,
+            _ => (),
         }
+
+        let encoded = ServerMsgExt::Encoded(Arc::new(encode(&msg)));
+
+        self.stream_write_txs.retain(|_, tx| {
+            if let Err(e) = tx.send(encoded.clone()) {
+                eprintln!("stream write error: {}", e);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     async fn receive_broadcast(&mut self, msg: ServerMsg) -> Option<ServerMsg> {
@@ -575,7 +576,6 @@ impl SocketListener {
                 }
                 // send the unsend msg
                 _ = checker.wait() => {
-                    println!("deadline reached!");
                     // send state
                     let state = self.state.state().into_boxed_slice();
                     self.broadcast(ServerMsg::DownloadSync(state));
@@ -619,45 +619,79 @@ pub trait AsyncWriteSocketMsg<T> {
     fn write_msg(&mut self, msg: T) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }
 
+pub trait AsyncWriteEncodedSocketMsg {
+    fn write_encoded_msg(
+        &mut self,
+        msg: &EncodedMsg,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+}
+
+impl<U: AsyncWriteExt + std::marker::Unpin + std::marker::Send> AsyncWriteEncodedSocketMsg for U {
+    async fn write_encoded_msg(&mut self, msg: &EncodedMsg) -> io::Result<()> {
+        self.write_all(&(msg.0.len() as u32).to_be_bytes()).await?;
+        self.write_all(&msg.0).await?;
+        Ok(())
+    }
+}
+
+impl<T: Encode + std::marker::Send, U: std::marker::Send + AsyncWriteEncodedSocketMsg>
+    AsyncWriteSocketMsg<T> for U
+{
+    async fn write_msg(&mut self, msg: T) -> io::Result<()> {
+        let encoded = encode(&msg);
+        self.write_encoded_msg(&encoded).await?;
+        Ok(())
+    }
+}
+
 pub trait WriteSocketMsg<T> {
     fn write_msg(&mut self, msg: T) -> std::io::Result<()>;
 }
 
+pub trait WriteEncodedSocketMsg {
+    fn write_encoded_msg(&mut self, msg: EncodedMsg) -> std::io::Result<()>;
+}
+
+impl<U: std::io::Write> WriteEncodedSocketMsg for U {
+    fn write_encoded_msg(&mut self, msg: EncodedMsg) -> std::io::Result<()> {
+        self.write_all(&(msg.0.len() as u32).to_be_bytes())?;
+        self.write_all(&msg.0)?;
+        Ok(())
+    }
+}
+
+impl<T: Encode, U: WriteEncodedSocketMsg> WriteSocketMsg<T> for U {
+    fn write_msg(&mut self, msg: T) -> io::Result<()> {
+        let encoded = encode(&msg);
+        self.write_encoded_msg(encoded)?;
+        Ok(())
+    }
+}
+
+fn encode<T: Encode>(msg: &T) -> EncodedMsg {
+    let content = bitcode::encode(msg);
+    if content.len() > u32::MAX as usize {
+        panic!("content length must not exceed {} bytes", u32::MAX);
+    }
+    EncodedMsg(content)
+}
+
+pub struct EncodedMsg(Vec<u8>);
+
+#[derive(Clone)]
+pub enum ServerMsgExt {
+    Encoded(Arc<EncodedMsg>),
+    Raw(ServerMsg),
+}
+
+impl From<ServerMsg> for ServerMsgExt {
+    fn from(value: ServerMsg) -> Self {
+        ServerMsgExt::Raw(value)
+    }
+}
+
 pub trait AsyncReadSocketMsg<T> {
     fn read_msg(&mut self) -> impl std::future::Future<Output = Result<T, io::Error>> + Send;
-}
-
-impl<T: Encode + std::marker::Send, U: AsyncWriteExt + std::marker::Unpin + std::marker::Send>
-    AsyncWriteSocketMsg<T> for U
-{
-    async fn write_msg(&mut self, msg: T) -> io::Result<()> {
-        let content = bitcode::encode(&msg);
-        if content.len() > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("content length must be less than {} bytes", u32::MAX),
-            ));
-        }
-        self.write_all(&(content.len() as u32).to_be_bytes())
-            .await?;
-        self.write_all(&content).await?;
-        Ok(())
-    }
-}
-
-impl<T: Encode + std::marker::Send, U: std::io::Write> WriteSocketMsg<T> for U {
-    fn write_msg(&mut self, msg: T) -> io::Result<()> {
-        let content = bitcode::encode(&msg);
-        if content.len() > u32::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("content length must be less than {} bytes", u32::MAX),
-            ));
-        }
-        self.write_all(&(content.len() as u32).to_be_bytes())?;
-        self.write_all(&content)?;
-        Ok(())
-    }
 }
 
 impl<T: DecodeOwned + std::marker::Send, U: AsyncReadExt + std::marker::Unpin + std::marker::Send>

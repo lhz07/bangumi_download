@@ -4,7 +4,8 @@ use crate::errors::{CatError, CloudError, DownloadError};
 use crate::id::Id;
 use crate::recovery_signal::RECOVERY_SIGNAL;
 use crate::socket_utils::{
-    AnimeCoder, AsyncReadSocketMsg, AsyncWriteSocketMsg, ClientMsg, ServerMsg,
+    AnimeCoder, AsyncReadSocketMsg, AsyncWriteEncodedSocketMsg, AsyncWriteSocketMsg, ClientMsg,
+    ServerMsg, ServerMsgExt,
 };
 use crate::update_rss::start_rss_receive;
 use crate::{
@@ -410,11 +411,14 @@ async fn del_a_task<T: DeleteTask + 'static>(
 }
 
 pub async fn write_socket(
-    mut rx: UnboundedReceiver<ServerMsg>,
+    mut rx: UnboundedReceiver<ServerMsgExt>,
     mut write: OwnedWriteHalf,
 ) -> io::Result<()> {
     while let Some(msg) = rx.recv().await {
-        write.write_msg(msg).await?;
+        match msg {
+            ServerMsgExt::Encoded(encoded) => write.write_encoded_msg(&encoded).await?,
+            ServerMsgExt::Raw(msg) => write.write_msg(msg).await?,
+        }
     }
     Ok(())
 }
@@ -434,6 +438,18 @@ impl SafeSend<(Id, ClientMsg)> for UnboundedSender<(Id, ClientMsg)> {
 impl SafeSend<ServerMsg> for UnboundedSender<ServerMsg> {
     fn send_msg(&self, msg: ServerMsg) {
         if let Err(e) = self.send(msg) {
+            // log error
+            eprintln!(
+                "Error occured when sending msg to server msg handler: {}",
+                e
+            );
+        }
+    }
+}
+
+impl SafeSend<ServerMsg> for UnboundedSender<ServerMsgExt> {
+    fn send_msg(&self, msg: ServerMsg) {
+        if let Err(e) = self.send(msg.into()) {
             // log error
             eprintln!(
                 "Error occured when sending msg to server msg handler: {}",
