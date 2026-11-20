@@ -1,6 +1,7 @@
 use crate::time_stamp::TimeStamp;
 use arc_swap::ArcSwap;
 use bitcode::{Decode, Encode};
+use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -39,6 +40,7 @@ pub struct Config {
 pub struct DownloadingTask {
     pub status: DownloadStatus,
     pub ani_name: String,
+    pub start_time: Option<DateTime<Utc>>,
 }
 
 impl DownloadingTask {
@@ -46,6 +48,7 @@ impl DownloadingTask {
         Self {
             status: DownloadStatus::Downloading,
             ani_name,
+            start_time: None,
         }
     }
 }

@@ -17,7 +17,7 @@ use crate::{
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -160,16 +160,14 @@ pub async fn refresh_download() -> Result<(), CatError> {
         Duration::from_secs(600),
     ];
     let mut wait_time = StatusIter::new(&WAIT_TIME_LIST);
-    // let mut error_task = HashMap::new();
-    let mut task_download_time: HashMap<String, Instant> = HashMap::new();
     loop {
         println!("running refresh download");
+        let config = CONFIG.load();
         let hash_ani = {
-            let config = CONFIG.load();
             if config.hash_ani.is_empty() {
                 break;
             } else {
-                &config.hash_ani.clone()
+                &config.hash_ani
             }
         };
         let to_download = hash_ani
@@ -244,32 +242,38 @@ pub async fn refresh_download() -> Result<(), CatError> {
                     "Task {} is downloading on cloud: {}%",
                     task.name, task.percent_done
                 );
-                let task_hash = &task.hash;
-                match task_download_time.get(task_hash) {
+                match hash_ani[&task.hash].start_time {
                     Some(instant) => {
-                        if instant.elapsed().as_secs() > 1800 {
+                        let now = chrono::Utc::now();
+                        let delta = now - instant;
+                        if delta.num_seconds() > 1800 {
                             // move to slow queue
-                            let insert_key = task_hash.to_string();
-                            let insert_value = hash_ani[task_hash].to_owned();
-                            let cmd = Box::new(|config: &mut Config| {
-                                config.hash_ani_slow.insert(insert_key, insert_value);
-                            });
-                            let msg = Message::new(cmd, None);
-                            tx.send_msg(msg);
                             let notify = Arc::new(Notify::new());
-                            let remove_key = task_hash.to_string();
                             let cmd = Box::new(move |config: &mut Config| {
-                                config.hash_ani.remove(&remove_key);
+                                let slow_task = config.hash_ani.remove(&task.hash);
+                                config.hash_ani_slow.insert(task.hash, slow_task.unwrap());
                             });
                             let msg = Message::new(cmd, Some(notify.clone()));
                             tx.send_msg(msg);
                             notify.notified().await;
-                            task_download_time.remove(task_hash);
                             restart_refresh_download_slow().await?;
                         }
                     }
                     None => {
-                        task_download_time.insert(task_hash.to_string(), Instant::now());
+                        let start_time = chrono::Utc::now();
+                        let cmd = Box::new(move |config: &mut Config| {
+                            if let Some(task) = config.hash_ani.get_mut(&task.hash) {
+                                task.start_time = Some(start_time);
+                            } else {
+                                eprintln!(
+                                    "try to record start_time, but can not find the task in config"
+                                );
+                            }
+                        });
+                        let notify = Arc::new(Notify::new());
+                        let msg = Message::new(cmd, Some(notify.clone()));
+                        tx.send_msg(msg);
+                        notify.notified().await;
                     }
                 }
             }
