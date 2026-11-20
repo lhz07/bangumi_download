@@ -22,17 +22,38 @@ pub struct Config {
     /// - `value`: SubGroup
     pub filter: HashMap<String, SubGroup>,
     /// - `key`: task hash
-    /// - `value`: anime name
-    pub hash_ani: HashMap<String, String>,
+    /// - `value`: task
+    pub hash_ani: HashMap<String, DownloadingTask>,
     /// - `key`: task hash
-    /// - `value`: anime name
-    pub hash_ani_slow: HashMap<String, String>,
+    /// - `value`: task
+    pub hash_ani_slow: HashMap<String, DownloadingTask>,
     /// - `key`: bangumi name
     /// - `value`: `Vec<MagnetLink>`
     pub magnets: HashMap<String, Vec<String>>,
     /// - `key`: bangumi ID
     /// - `value`: (bangumi name, rss link)
     pub rss_links: HashMap<String, (String, String)>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DownloadingTask {
+    pub status: DownloadStatus,
+    pub ani_name: String,
+}
+
+impl DownloadingTask {
+    pub fn new(ani_name: String) -> Self {
+        Self {
+            status: DownloadStatus::Downloading,
+            ani_name,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum DownloadStatus {
+    Downloading,
+    Failed,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Encode, Decode)]

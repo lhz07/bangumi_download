@@ -1,5 +1,7 @@
 use crate::cloud_manager::{check_cookies, del_cloud_task, download_a_folder, get_tasks_list};
-use crate::config_manager::{Bangumi, CONFIG, Config, Message, SafeSend, modify_config};
+use crate::config_manager::{
+    Bangumi, CONFIG, Config, DownloadStatus, Message, SafeSend, modify_config,
+};
 use crate::errors::{CatError, CloudError, DownloadError};
 use crate::id::Id;
 use crate::recovery_signal::RECOVERY_SIGNAL;
@@ -158,19 +160,30 @@ pub async fn refresh_download() -> Result<(), CatError> {
         Duration::from_secs(600),
     ];
     let mut wait_time = StatusIter::new(&WAIT_TIME_LIST);
-    let mut error_task = HashMap::new();
+    // let mut error_task = HashMap::new();
     let mut task_download_time: HashMap<String, Instant> = HashMap::new();
-    'outer: loop {
+    loop {
         println!("running refresh download");
         let hash_ani = {
             let config = CONFIG.load();
             if config.hash_ani.is_empty() {
                 break;
             } else {
-                &config.clone().hash_ani
+                &config.hash_ani.clone()
             }
         };
-        let tasks_list = match get_tasks_list(hash_ani.keys().collect()).await {
+        let to_download = hash_ani
+            .iter()
+            .filter_map(|(hash, task)| {
+                // skip the failed task
+                if task.status == DownloadStatus::Downloading {
+                    Some(hash)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let tasks_list = match get_tasks_list(to_download).await {
             Ok(list) => list,
             Err(error) => {
                 eprintln!("Error occurred when attempting to obtain the task list: {error}");
@@ -181,43 +194,63 @@ pub async fn refresh_download() -> Result<(), CatError> {
         let tx = TX.load_full().ok_or(CatError::Exit)?;
         for task in tasks_list {
             // download task failed, delete it
-            let task_hash = &task.hash;
+            // let task_hash = &task.hash;
             if task.status == -1 {
-                del_a_task::<HashAni>(&tx, task_hash).await?;
+                del_a_task::<HashAni>(&tx, &task.hash).await?;
             }
             if task.percent_done == 100 {
                 // download file
-                let ani_name = hash_ani[task_hash].to_owned();
+                let ani_name = hash_ani[&task.hash].ani_name.to_owned();
                 println!("Downloading task {}", task.name);
-                // TODO: parallelize downloading folders
-                if let Err(error) = download_a_folder(&task.folder_id, Some(&ani_name)).await {
-                    eprintln!("Can not download a task, error: {}", error);
-                    error_task
-                        .entry(task_hash.to_string())
-                        .and_modify(|times| *times += 1)
-                        .or_insert(1);
-                    if error_task[task_hash] > 2 {
-                        break 'outer;
+                // let _ = DOWNLOAD_SEMA
+                //     .acquire()
+                //     .await
+                //     .expect("Download semaphore should keep open!");
+                // error_task
+                //     .entry(task.hash.to_string())
+                //     .and_modify(|times| *times += 1)
+                //     .or_insert(1);
+                let tx = tx.clone();
+                // wait for a while to avoid getting banned
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::spawn(async move {
+                    if let Err(error) = download_a_folder(&task.folder_id, Some(&ani_name)).await {
+                        eprintln!("Can not download a task, error: {}", error);
+                        let cmd = Box::new(move |config: &mut Config| {
+                            if let Some(task) = config.hash_ani.get_mut(&task.hash) {
+                                task.status = DownloadStatus::Failed;
+                            } else {
+                                eprintln!("can not find the failed task in config");
+                            }
+                        });
+                        let msg = Message::new(cmd, None);
+                        tx.send_msg(msg);
+                        return;
+                        // NOTE: we download different folder, but they are no difference on cloud,
+                        // so if a download fails, it means other download may fail, too.
                     }
-                    // NOTE: we download different folder, but they are no difference on cloud,
-                    // so if a download fails, it means other download may fail, too.
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    continue;
-                }
-                // after download
-                del_a_task::<HashAni>(&tx, task_hash).await?;
-                println!("Task {} is finished and deleted!", task.name);
+                    // after download
+                    if let Err(e) = del_a_task::<HashAni>(&tx, &task.hash).await {
+                        eprintln!(
+                            "Task {} is finished, but can not delete cloud task: {e}",
+                            task.name
+                        );
+                    } else {
+                        println!("Task {} is finished and deleted!", task.name);
+                    }
+                });
             } else {
                 println!(
                     "Task {} is downloading on cloud: {}%",
                     task.name, task.percent_done
                 );
+                let task_hash = &task.hash;
                 match task_download_time.get(task_hash) {
                     Some(instant) => {
                         if instant.elapsed().as_secs() > 1800 {
                             // move to slow queue
                             let insert_key = task_hash.to_string();
-                            let insert_value = hash_ani[task_hash].to_string();
+                            let insert_value = hash_ani[task_hash].to_owned();
                             let cmd = Box::new(|config: &mut Config| {
                                 config.hash_ani_slow.insert(insert_key, insert_value);
                             });
@@ -326,6 +359,8 @@ pub async fn restart_refresh_download_slow() -> Result<(), CatError> {
     Ok(())
 }
 
+// TODO: keep the same behavior as `refresh_download`,
+// or just merge the same logic into one function
 pub async fn refresh_download_slow() -> Result<(), CatError> {
     println!("refresh download slow is started");
     let wait_time = Duration::from_mins(60);
@@ -356,7 +391,7 @@ pub async fn refresh_download_slow() -> Result<(), CatError> {
             }
             if task.percent_done == 100 {
                 // download file
-                let ani_name = hash_ani[task_hash].clone();
+                let ani_name = hash_ani[task_hash].ani_name.clone();
                 println!("Downloading task {}", task.name);
                 if let Err(error) = download_a_folder(&task.folder_id, Some(&ani_name)).await {
                     eprintln!("Can not download a task, error: {}", error);

@@ -44,7 +44,7 @@ pub enum CloudError {
     #[error("Param error: {0}")]
     Param(String),
     #[error("Download errors: {0:?}")]
-    DownloadErrors(Vec<(Id, DownloadError)>),
+    DownloadErrors(Vec<(Id, anyhow::Error)>),
 }
 
 #[derive(Error, Debug)]

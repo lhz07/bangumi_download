@@ -6,7 +6,8 @@ use crate::id::Id;
 use crate::login_with_qrcode::login_with_qrcode;
 use crate::socket_utils::{DownloadMsg, DownloadState, ServerMsg};
 use crate::{
-    BROADCAST_TX, CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, LOGIN_STATUS,
+    BROADCAST_TX, CLIENT_DOWNLOAD, CLIENT_WITH_RETRY, CLIENT_WITH_RETRY_MOBILE, DOWNLOAD_SEMA,
+    LOGIN_STATUS,
 };
 use futures::future::join_all;
 use regex::Regex;
@@ -17,15 +18,13 @@ use reqwest::header::{
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs as sfs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::fs;
-use tokio::sync::Semaphore;
 use tokio_retry::Retry;
 use tokio_retry::strategy::FixedInterval;
 
@@ -347,7 +346,7 @@ pub async fn del_cloud_task(hash: &str) -> Result<(), CloudError> {
     }
 }
 
-pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, CloudError> {
+pub async fn get_tasks_list(hash_list: HashSet<&String>) -> Result<Vec<Task>, CloudError> {
     let client = &CLIENT_WITH_RETRY;
     let cookies = &CONFIG.load().cookies;
     let mut headers = HeaderMap::new();
@@ -383,7 +382,7 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, CloudE
     let mut current_tasks = tasks_response
         .tasks
         .into_iter()
-        .filter(|task| hash_list.iter().any(|hash| **hash == task.hash))
+        .filter(|task| hash_list.contains(&task.hash))
         .collect::<Vec<_>>();
     let mut page = 1;
     println!("checked page 1, now start checking all tasks");
@@ -411,7 +410,7 @@ pub async fn get_tasks_list(hash_list: Vec<&String>) -> Result<Vec<Task>, CloudE
         let mut left_tasks = tasks_response
             .tasks
             .into_iter()
-            .filter(|task| hash_list.iter().any(|hash| **hash == task.hash))
+            .filter(|task| hash_list.contains(&task.hash))
             .collect::<Vec<_>>();
         current_tasks.append(&mut left_tasks);
     }
@@ -554,28 +553,32 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
         }
     }
     // restrict parallel downloading tasks
-    let sema = Arc::new(Semaphore::new(5));
     let mut download_handles = Vec::new();
     for (id_guard, file) in files_to_download {
         // wait for a while to avoid getting banned
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let DownloadInfo {
-            file_name,
-            url: FileDownloadUrl { url, .. },
-            ..
-        } = get_download_link(client, file.info.pick_code).await?;
         let mut path = storge_path.clone();
         path.push(file.path);
-        path.push(&file_name);
-        let sema = sema.clone();
-        // require the permission first, to avoid holding the
-        // download url for a long time
-        let permit = sema
-            .acquire_owned()
-            .await
-            .expect("semaphore is not closed here");
+
         download_handles.push(tokio::spawn(async move {
-            let _permit = permit;
+            let sema = DOWNLOAD_SEMA.clone();
+            // require the permission first, to avoid holding the
+            // download url for a long time and get a good place in
+            // the queue.
+            let _permit = sema
+                .acquire_owned()
+                .await
+                .expect("semaphore is not closed here");
+            let (file_name, url) = match get_download_link(client, file.info.pick_code).await {
+                Ok(DownloadInfo {
+                    file_name,
+                    url: FileDownloadUrl { url, .. },
+                    ..
+                }) => (file_name, url),
+                Err(e) => return (id_guard, Err(anyhow::anyhow!(e))),
+            };
+
+            path.push(file_name);
             let id = *id_guard.inner();
             (
                 id_guard,
@@ -586,7 +589,8 @@ pub async fn download_a_folder(folder_id: &str, ani_name: Option<&str>) -> Resul
                     file.info.size.unwrap(),
                     file.info.sha1.unwrap(),
                 )
-                .await,
+                .await
+                .map_err(anyhow::Error::new),
             )
         }));
     }

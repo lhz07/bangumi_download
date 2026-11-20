@@ -1,5 +1,7 @@
 use crate::cloud_manager::cloud_download;
-use crate::config_manager::{Bangumi, CONFIG, Config, Message, SafeSend, SubGroup};
+use crate::config_manager::{
+    Bangumi, CONFIG, Config, DownloadingTask, Message, SafeSend, SubGroup,
+};
 use crate::errors::{CatError, CloudError, DownloadError};
 use crate::main_proc::{restart_refresh_download, restart_refresh_download_slow};
 use crate::time_stamp::TimeStamp;
@@ -394,7 +396,7 @@ pub async fn rss_receive(
             Ok(hash_list) => {
                 let mut hash_ani = HashMap::new();
                 for i in &hash_list {
-                    hash_ani.insert(i.clone(), title.clone());
+                    hash_ani.insert(i.clone(), DownloadingTask::new(title.clone()));
                 }
                 let cmd = Box::new(move |config: &mut Config| {
                     config.magnets.remove(&title);

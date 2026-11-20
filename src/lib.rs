@@ -32,6 +32,7 @@ use reqwest_retry::RetryTransientMiddleware;
 use reqwest_retry::policies::ExponentialBackoff;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Notify, Semaphore};
@@ -116,3 +117,5 @@ pub static UTC_8: FixedOffset = FixedOffset::east_opt(8 * 3600).unwrap();
 pub static RSS_DATA_PERMIT: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
 pub static LOGIN_STATUS: AtomicBool = AtomicBool::new(false);
 pub static CLIENT_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub static DOWNLOAD_SEMA: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::const_new(5)));
